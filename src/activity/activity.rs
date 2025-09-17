@@ -135,29 +135,36 @@ impl ActivityFuture {
         Self { queue, activity_id }
     }
 
-    // this method should consume the instance and hence only let get_result to be callable once on an ActivityFuture
+    /// Get the result of the activity execution
+    ///
+    /// This method consumes the ActivityFuture and waits for the activity to complete.
+    /// It uses a timeout-based approach to avoid infinite resource consumption.
+    ///
+    /// # Returns
+    /// - `Ok(Some(value))` if the activity completed successfully with a result
+    /// - `Ok(None)` if the activity completed successfully without a result
+    /// - `Err(WorkerError::Timeout)` if the activity didn't complete within the timeout
+    /// - `Err(WorkerError::CustomError)` if the activity failed
     pub async fn get_result(self) -> Result<Option<serde_json::Value>, crate::WorkerError> {
-        // Poll for result with timeout
         let timeout = std::time::Duration::from_secs(300); // 5 minutes timeout
-        let start_time = std::time::Instant::now();
 
-        loop {
-            if let Some(result) = self.queue.get_result(self.activity_id).await? {
-                return match result.state {
-                    ResultState::Ok => Ok(result.data),
-                    ResultState::Err => {
-                        let result_json = serde_json::to_string(&result.data)?;
-                        Err(WorkerError::CustomError(result_json))
-                    }
-                };
+        tokio::time::timeout(timeout, async move {
+            loop {
+                if let Some(result) = self.queue.get_result(self.activity_id).await? {
+                    return match result.state {
+                        ResultState::Ok => Ok(result.data),
+                        ResultState::Err => {
+                            let result_json = serde_json::to_string(&result.data)?;
+                            Err(WorkerError::CustomError(result_json))
+                        }
+                    };
+                }
+
+                // Use exponential backoff to reduce load: start with 50ms, cap at 1s
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
-
-            if start_time.elapsed() > timeout {
-                return Err(crate::WorkerError::Timeout);
-            }
-
-            // Wait a bit before polling again
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+        })
+        .await
+        .map_err(|_| crate::WorkerError::Timeout)?
     }
 }

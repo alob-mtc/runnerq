@@ -199,10 +199,14 @@ impl WorkerEngine {
                                 {
                                     error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
                                 }
-                                // Store the result in the result queue
+                                // Store the error result in the result queue
                                 let activity_result = ActivityResult {
-                                    data: Some(json!(reason)),
-                                    state: ResultState::Ok,
+                                    data: Some(json!({
+                                        "error": reason,
+                                        "type": "non_retryable",
+                                        "failed_at": chrono::Utc::now().to_rfc3339()
+                                    })),
+                                    state: ResultState::Err,
                                 };
                                 if let Err(e) = activity_queue
                                     .store_result(activity_id, activity_result)
