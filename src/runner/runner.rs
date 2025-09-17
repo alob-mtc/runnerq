@@ -41,7 +41,7 @@ impl WorkerEngine {
         }
 
         info!(
-            max_concurrent_activitys = self.config.max_concurrent_activities,
+            max_concurrent_activities = self.config.max_concurrent_activities,
             "Starting worker engine"
         );
 
@@ -51,8 +51,8 @@ impl WorkerEngine {
         ));
         let mut join_handles = Vec::new();
 
-        // Start scheduled activity processor
-        let scheduled_processor_handle = self.start_scheduled_activity_processor().await;
+        // Start scheduled activities processor
+        let scheduled_processor_handle = self.start_scheduled_activities_processor().await;
         join_handles.push(scheduled_processor_handle);
 
         // Start worker loops
@@ -234,23 +234,23 @@ impl WorkerEngine {
         })
     }
 
-    async fn start_scheduled_activity_processor(&self) -> tokio::task::JoinHandle<()> {
+    async fn start_scheduled_activities_processor(&self) -> tokio::task::JoinHandle<()> {
         let activity_queue = self.activity_queue.clone();
         let running = self.running.clone();
 
         tokio::spawn(async move {
-            debug!("Starting scheduled activity processor");
+            debug!("Starting scheduled activities processor");
 
             while *running.read().await {
-                if let Err(e) = activity_queue.process_scheduled_activitys().await {
-                    error!(error = %e, "Failed to process scheduled activity");
+                if let Err(e) = activity_queue.process_scheduled_activities().await {
+                    error!(error = %e, "Failed to process scheduled activities");
                 }
 
-                // Check for scheduled activity every 30 seconds
+                // Check for scheduled activities every 30 seconds
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }
 
-            debug!("Scheduled activity processor stopped");
+            debug!("Scheduled activities processor stopped");
         })
     }
 

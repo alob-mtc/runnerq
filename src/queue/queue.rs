@@ -31,8 +31,8 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
     /// Schedule an activity for future execution
     async fn schedule_activity(&self, activity: Activity) -> Result<(), WorkerError>;
 
-    /// Process scheduled activity that are ready to run
-    async fn process_scheduled_activitys(&self) -> Result<Vec<Activity>, WorkerError>;
+    /// Process scheduled activities that are ready to run
+    async fn process_scheduled_activities(&self) -> Result<Vec<Activity>, WorkerError>;
 
     #[allow(dead_code)]
     /// Get queue statistics
@@ -237,7 +237,7 @@ impl ActivityQueueTrait for ActivityQueue {
         })?;
 
         let activity_json = serde_json::to_string(&activity)?;
-        let scheduled_key = "scheduled_activitys";
+        let scheduled_key = "scheduled_activities";
 
         let scheduled_at = activity
             .scheduled_at
@@ -253,21 +253,21 @@ impl ActivityQueueTrait for ActivityQueue {
         Ok(())
     }
 
-    /// Process scheduled activity that are ready to run
-    async fn process_scheduled_activitys(&self) -> Result<Vec<Activity>, WorkerError> {
+    /// Process scheduled activities that are ready to run
+    async fn process_scheduled_activities(&self) -> Result<Vec<Activity>, WorkerError> {
         let mut conn = self.redis_pool.get().await.map_err(|e| {
             WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
         })?;
 
         let now = chrono::Utc::now().timestamp();
-        let scheduled_key = "scheduled_activitys";
+        let scheduled_key = "scheduled_activities";
 
-        // Get activity that are ready to run
+        // Get activities that are ready to run
         let activity_jsons: Vec<String> = conn
             .zrangebyscore_limit(scheduled_key, 0, now, 0, 100)
             .await?;
 
-        let mut ready_activitys = Vec::new();
+        let mut ready_activities = Vec::new();
 
         for activity_json in activity_jsons {
             // Remove from scheduled set
@@ -278,7 +278,7 @@ impl ActivityQueueTrait for ActivityQueue {
                 Ok(mut activity) => {
                     activity.status = ActivityStatus::Pending;
                     self.enqueue(activity.clone()).await?;
-                    ready_activitys.push(activity);
+                    ready_activities.push(activity);
                 }
                 Err(e) => {
                     error!(error = %e, "Failed to parse scheduled activity");
@@ -286,14 +286,14 @@ impl ActivityQueueTrait for ActivityQueue {
             }
         }
 
-        if !ready_activitys.is_empty() {
+        if !ready_activities.is_empty() {
             info!(
-                count = ready_activitys.len(),
-                "Processed scheduled activity"
+                count = ready_activities.len(),
+                "Processed scheduled activities"
             );
         }
 
-        Ok(ready_activitys)
+        Ok(ready_activities)
     }
 
     /// Get queue statistics
@@ -314,17 +314,17 @@ impl ActivityQueueTrait for ActivityQueue {
         let low_count: u64 = conn
             .llen(self.get_queue_key(&ActivityPriority::Low))
             .await?;
-        let scheduled_count: u64 = conn.zcard("scheduled_activitys").await?;
+        let scheduled_count: u64 = conn.zcard("scheduled_activities").await?;
         let dead_letter_count: u64 = conn.llen("dead_letter_queue").await?;
 
         Ok(QueueStats {
-            pending_activitys: critical_count + high_count + normal_count + low_count,
+            pending_activities: critical_count + high_count + normal_count + low_count,
             critical_priority: critical_count,
             high_priority: high_count,
             normal_priority: normal_count,
             low_priority: low_count,
-            scheduled_activitys: scheduled_count,
-            dead_letter_activitys: dead_letter_count,
+            scheduled_activities: scheduled_count,
+            dead_letter_activities: dead_letter_count,
         })
     }
 
@@ -372,13 +372,13 @@ impl ActivityQueueTrait for ActivityQueue {
 
 #[derive(Debug)]
 pub struct QueueStats {
-    pub pending_activitys: u64,
+    pub pending_activities: u64,
     pub critical_priority: u64,
     pub high_priority: u64,
     pub normal_priority: u64,
     pub low_priority: u64,
-    pub scheduled_activitys: u64,
-    pub dead_letter_activitys: u64,
+    pub scheduled_activities: u64,
+    pub dead_letter_activities: u64,
 }
 
 #[derive(Serialize, Deserialize)]
