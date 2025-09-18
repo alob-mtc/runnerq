@@ -1,6 +1,6 @@
 [package]
 name = "runner_q"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["Akinlua Bolamigbe bolamigbeakinlua@gmail.com"]
 description = "Redis-based activity queue and worker system"

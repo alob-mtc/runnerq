@@ -15,11 +15,8 @@ A robust, scalable Redis-based activity queue and worker system for Rust applica
 
 ## Installation
 
-Add this to your `Cargo.toml`:
-
-```toml
-[dependencies]
-runner_q = "0.4.0"
+```sh
+cargo add runner_q
 ```
 
 ## Quick Start
@@ -41,9 +38,9 @@ impl ActivityHandler for SendEmailActivity {
         let to = payload["to"]
             .as_str()
             .ok_or_else(|| ActivityError::NonRetry("Missing 'to' field".to_string()))?;
-        
+
         println!("Sending email to: {}", to);
-        
+
         Ok(Some(serde_json::json!({
             "message": format!("Email sent to {}", to),
             "status": "delivered"
@@ -93,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(result) = future.get_result().await {
             match result {
                 Some(data) => {
-                    println!("Email result: {:?}", data);       
+                    println!("Email result: {:?}", data);
                 }
                 _ => {}
             }
@@ -159,18 +156,18 @@ impl ActivityHandler for PaymentActivity {
         let amount = payload["amount"]
             .as_f64()
             .ok_or_else(|| ActivityError::NonRetry("Missing or invalid amount".to_string()))?;
-        
+
         let currency = payload["currency"]
             .as_str()
             .unwrap_or("USD");
-        
+
         println!("Processing payment: {} {}", amount, currency);
-        
+
         // Validate amount
         if amount <= 0.0 {
             return Err(ActivityError::NonRetry("Invalid amount".to_string()));
         }
-        
+
         // Simulate payment processing
         Ok(Some(serde_json::json!({
             "transaction_id": "txn_123456",
@@ -266,9 +263,9 @@ impl ActivityHandler for ProcessOrderActivity {
     async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult {
         // Parse order data using ? operator for clean error handling
         let order: OrderData = serde_json::from_value(payload)?;
-        
+
         // Execute sub-activities using the context's worker engine
-        
+
         // 1. Update inventory
         let _inventory_future = context.worker_engine.execute_activity(
             "update_inventory".to_string(),
@@ -280,28 +277,28 @@ impl ActivityHandler for ProcessOrderActivity {
                 scheduled_at: None,
             })
         ).await.map_err(|e| ActivityError::Retry(format!("Failed to update inventory: {}", e)))?;
-        
+
         // 2. Send confirmation email
         let _email_future = context.worker_engine.execute_activity(
             "send_email".to_string(),
             serde_json::json!({"to": order.customer_email, "template": "order_confirmation"}),
             None
         ).await.map_err(|e| ActivityError::Retry(format!("Failed to send email: {}", e)))?;
-        
+
         // 3. Log the transaction
         context.worker_engine.execute_activity(
             "log_transaction".to_string(),
             serde_json::json!({"order_id": order.id, "status": "processed"}),
             None
         ).await.map_err(|e| ActivityError::NonRetry(format!("Failed to log transaction: {}", e)))?;
-        
+
         // Return success with result data
         Ok(Some(serde_json::json!({
             "order_id": order.id,
             "status": "completed"
         })))
     }
-    
+
     fn activity_type(&self) -> String {
         "process_order".to_string()
     }
@@ -332,17 +329,17 @@ impl ActivityHandler for MyActivity {
     async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult {
         // Use ? operator for automatic error conversion
         let data: MyData = serde_json::from_value(payload)?;
-        
+
         // Validate data
         if data.is_invalid() {
             return Err(ActivityError::NonRetry("Invalid data format".to_string()));
         }
-        
+
         // Perform operation that might temporarily fail
         let result = external_api_call(&data)
             .await
             .map_err(|e| ActivityError::Retry(format!("API call failed: {}", e)))?;
-        
+
         // Return success with result data
         Ok(Some(serde_json::json!({"result": result})))
     }
@@ -382,4 +379,3 @@ match worker_engine.execute_activity(activity_type.to_string(), payload, options
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
