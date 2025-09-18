@@ -291,6 +291,8 @@ impl ActivityQueueTrait for ActivityQueue {
         if !retryable {
             self.update_activity_status(&activity_id, &ActivityStatus::Failed)
                 .await?;
+
+            return Ok(());
         }
 
         if activity.max_retries == 0 || activity.retry_count < activity.max_retries {
