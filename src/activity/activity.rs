@@ -131,20 +131,47 @@ pub struct ActivityFuture {
 }
 
 impl ActivityFuture {
+    /// Creates a new ActivityFuture that can be used to poll for the result of a specific activity.
+    ///
+    /// The returned ActivityFuture holds the queue used to retrieve results and the UUID of the activity to query.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use uuid::Uuid;
+    /// # use crate::ActivityFuture;
+    /// # let queue = Arc::new(/* an implementation of ActivityQueueTrait */);
+    /// let activity_id = Uuid::new_v4();
+    /// let fut = ActivityFuture::new(queue, activity_id);
+    /// ```
     pub(crate) fn new(queue: Arc<dyn ActivityQueueTrait>, activity_id: Uuid) -> Self {
         Self { queue, activity_id }
     }
 
-    /// Get the result of the activity execution
+    /// Waits for and returns the completed activity result, consuming the `ActivityFuture`.
     ///
-    /// This method consumes the ActivityFuture and waits for the activity to complete.
-    /// It uses a timeout-based approach to avoid infinite resource consumption.
+    /// This async method polls the associated activity queue until the activity produces a result
+    /// or a 5-minute timeout elapses. On success it returns `Ok(Some(value))` when the activity
+    /// completed with a value, or `Ok(None)` when it completed without a value. If the activity
+    /// failed, the failure payload is converted to a JSON string and returned as
+    /// `Err(WorkerError::CustomError)`. If no result arrives within 5 minutes, it returns
+    /// `Err(WorkerError::Timeout)`.
     ///
-    /// # Returns
-    /// - `Ok(Some(value))` if the activity completed successfully with a result
-    /// - `Ok(None)` if the activity completed successfully without a result
-    /// - `Err(WorkerError::Timeout)` if the activity didn't complete within the timeout
-    /// - `Err(WorkerError::CustomError)` if the activity failed
+    /// The function propagates errors returned by the queue (e.g., `WorkerError` variants)
+    /// encountered while polling.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// // given `queue: Arc<dyn ActivityQueueTrait>` and `activity_id: Uuid`
+    /// let fut = ActivityFuture::new(queue.clone(), activity_id);
+    /// match fut.get_result().await {
+    ///     Ok(Some(json)) => println!("activity result: {:?}", json),
+    ///     Ok(None) => println!("activity completed with no result"),
+    ///     Err(e) => eprintln!("activity failed or timed out: {:?}", e),
+    /// }
+    /// ```
     pub async fn get_result(self) -> Result<Option<serde_json::Value>, crate::WorkerError> {
         let timeout = std::time::Duration::from_secs(300); // 5 minutes timeout
 

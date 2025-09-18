@@ -74,6 +74,16 @@ pub struct ActivityQueue {
 }
 
 impl ActivityQueue {
+    /// Creates a new ActivityQueue backed by the given Redis connection pool and using `queue_name` as the key prefix.
+    ///
+    /// `queue_name` is used as the prefix for Redis keys (for example: `"<queue_name>:priority_queue"`), so choose a stable, unique name per logical queue.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let pool: Pool<redis::aio::ConnectionManager> = unimplemented!();
+    /// let queue = ActivityQueue::new(pool, "my-activities".to_string());
+    /// ```
     pub fn new(redis_pool: Pool<RedisConnectionManager>, queue_name: String) -> Self {
         Self {
             redis_pool,
@@ -81,20 +91,43 @@ impl ActivityQueue {
         }
     }
 
-    /// Get the main queue key for the priority queue
+    /// Return the Redis key used for the main priority queue.
+    ///
+    /// The key is built by appending `":priority_queue"` to the queue's `queue_name`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // `pool` represents a Redis connection pool available in your context.
+    /// let queue = ActivityQueue::new(pool, "my_queue");
+    /// let key = queue.get_main_queue_key();
+    /// assert_eq!(key, "my_queue:priority_queue");
+    /// ```
     fn get_main_queue_key(&self) -> String {
         format!("{}:priority_queue", self.queue_name)
     }
 
-    /// Calculate priority score for sorted set
+    /// Compute a numeric score for the Redis sorted set that encodes priority and FIFO order.
     ///
-    /// Higher priority = higher score for Redis ZREVRANGE operations
-    /// Format: priority_weight + timestamp_microseconds
+    /// The returned score is: `priority_weight + (created_at_microseconds % 1_000_000)`.
+    /// Priority weights ensure higher-priority activities sort before lower ones when using
+    /// ZREVRANGE; the microsecond portion preserves FIFO ordering within the same priority.
     ///
-    /// This ensures:
-    /// 1. Higher priority activities are always processed first
-    /// 2. Within same priority, FIFO ordering is maintained
-    /// 3. Score is unique for each activity (timestamp precision)
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Higher priority yields a larger score:
+    /// let score_critical = queue.calculate_priority_score(&ActivityPriority::Critical, chrono::Utc::now());
+    /// let score_normal = queue.calculate_priority_score(&ActivityPriority::Normal, chrono::Utc::now());
+    /// assert!(score_critical > score_normal);
+    ///
+    /// // Later-created activity within same priority has a larger score (FIFO):
+    /// let t1 = chrono::Utc::now();
+    /// let t2 = t1 + chrono::Duration::milliseconds(1);
+    /// let s1 = queue.calculate_priority_score(&ActivityPriority::Normal, t1);
+    /// let s2 = queue.calculate_priority_score(&ActivityPriority::Normal, t2);
+    /// assert!(s2 > s1);
+    /// ```
     fn calculate_priority_score(
         &self,
         priority: &ActivityPriority,
@@ -115,7 +148,19 @@ impl ActivityQueue {
         priority_weight + (timestamp_micros % 1_000_000.0) // Modulo to prevent overflow while maintaining ordering
     }
 
-    /// Extract activity ID from queue entry for removal operations
+    /// Create the string stored as a Redis queue entry for an activity.
+    ///
+    /// The returned value is the activity ID, a colon, then the activity serialized as JSON:
+    /// `"<activity_id>:<activity_json>"`. This format is parsed by `parse_queue_entry` when
+    /// reading entries from the queue and is used as the member value stored in the priority ZSET.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assuming `queue` implements `create_queue_entry` and `activity` has an `id` field:
+    /// let entry = queue.create_queue_entry(&activity);
+    /// assert!(entry.starts_with(&activity.id));
+    /// ```
     fn create_queue_entry(&self, activity: &Activity) -> String {
         format!(
             "{}:{}",
@@ -124,7 +169,25 @@ impl ActivityQueue {
         )
     }
 
-    /// Parse queue entry back to activity
+    /// Parse a queue entry string and deserialize it into an Activity.
+    ///
+    /// The queue entry must be in the format `<activity_id>:<activity_json>`.
+    /// This function extracts the substring after the first colon and attempts
+    /// to deserialize it as JSON into an `Activity`.
+    ///
+    /// Returns a `WorkerError::QueueError` if the entry does not contain a colon
+    /// or if the JSON cannot be parsed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Given an entry like "abc123:{\"id\":\"abc123\",\"name\":\"do_work\",\"priority\":\"Normal\"}",
+    /// // the JSON portion after the first colon is deserialized into `Activity`.
+    /// let entry = r#"abc123:{"id":"abc123","name":"do_work","priority":"Normal"}"#;
+    /// let activity_json = &entry[entry.find(':').unwrap() + 1..];
+    /// let activity: crate::Activity = serde_json::from_str(activity_json).unwrap();
+    /// assert_eq!(activity.id, "abc123");
+    /// ```
     fn parse_queue_entry(&self, entry: &str) -> Result<Activity, WorkerError> {
         if let Some(colon_pos) = entry.find(':') {
             let activity_json = &entry[colon_pos + 1..];
@@ -137,6 +200,20 @@ impl ActivityQueue {
         }
     }
 
+    /// Update the stored status of an activity in Redis.
+    ///
+    /// Writes the JSON-serialized `status` into the hash key `activity:<activity_id>` under the field `"status"`.
+    /// Returns Ok(()) on success or a `WorkerError::QueueError` if a Redis connection cannot be obtained or on serialization/Redis errors.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # async fn example(queue: &ActivityQueue) -> Result<(), WorkerError> {
+    /// let id = uuid::Uuid::new_v4();
+    /// queue.update_activity_status(&id, &ActivityStatus::Running).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     async fn update_activity_status(
         &self,
         activity_id: &uuid::Uuid,
@@ -182,7 +259,25 @@ impl ActivityQueue {
 
 #[async_trait]
 impl ActivityQueueTrait for ActivityQueue {
-    /// Enqueue an activity using optimized sorted set approach
+    /// Enqueue an activity into the Redis-backed priority queue.
+    ///
+    /// Adds the given `activity` to the main ZSET using a score computed from the activity's
+    /// priority and creation timestamp (ensuring priority ordering with FIFO within the same
+    /// priority). Also stores activity metadata in a Redis hash (including status, retry count,
+    /// priority, and computed score) and sets a 24-hour TTL on that metadata.
+    ///
+    /// Returns `Ok(())` on success or a `WorkerError::QueueError` (or other mapped error) on failure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use futures::executor::block_on;
+    /// # // Setup omitted: create `queue: ActivityQueue` and an `activity: Activity`.
+    /// # block_on(async {
+    /// // enqueue an activity asynchronously
+    /// queue.enqueue(activity).await.unwrap();
+    /// # });
+    /// ```
     async fn enqueue(&self, activity: Activity) -> Result<(), WorkerError> {
         let mut conn = self.redis_pool.get().await.map_err(|e| {
             WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
@@ -223,7 +318,39 @@ impl ActivityQueueTrait for ActivityQueue {
         Ok(())
     }
 
-    /// Dequeue the next highest priority activity using single atomic operation
+    /// Dequeues the highest-priority ready activity, waiting up to `timeout`.
+    ///
+    /// Attempts to remove the top-scoring entry from the queue and, on success,
+    /// marks the activity's status as `Running` in Redis before returning it.
+    /// If no activity becomes available within `timeout`, returns `Ok(None)`.
+    ///
+    /// Notes:
+    /// - The method performs a non-blocking polling loop (with exponential backoff)
+    ///   against the Redis sorted set and uses an atomic remove attempt to claim an
+    ///   entry. On success the activity is parsed and its status persisted as
+    ///   `Running`.
+    /// - Side effects: updates activity metadata in Redis (status -> `Running`)
+    ///   and removes the dequeued entry from the main queue.
+    ///
+    /// # Parameters
+    /// - `timeout`: total duration to wait for an activity before returning `None`.
+    ///
+    /// # Returns
+    /// `Ok(Some(Activity))` when an activity was claimed and updated to `Running`,
+    /// `Ok(None)` if the timeout elapsed without any available activity, or
+    /// `Err(WorkerError)` for Redis/parse errors.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # async fn example(q: &ActivityQueue) -> Result<(), WorkerError> {
+    /// let timeout = std::time::Duration::from_secs(5);
+    /// if let Some(activity) = q.dequeue(timeout).await? {
+    ///     // process `activity`
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     async fn dequeue(&self, timeout: Duration) -> Result<Option<Activity>, WorkerError> {
         let mut conn = self.redis_pool.get().await.map_err(|e| {
             WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
@@ -273,6 +400,19 @@ impl ActivityQueueTrait for ActivityQueue {
         Ok(None) // Timeout
     }
 
+    /// Mark an activity as completed by updating its stored status.
+    ///
+    /// Updates the activity's status to `Completed` (persisted in Redis) and returns when the update succeeds.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(queue: &ActivityQueue) -> Result<(), WorkerError> {
+    /// let activity_id = uuid::Uuid::new_v4();
+    /// queue.mark_completed(activity_id).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     async fn mark_completed(&self, activity_id: uuid::Uuid) -> Result<(), WorkerError> {
         self.update_activity_status(&activity_id, &ActivityStatus::Completed)
             .await?;
@@ -280,6 +420,36 @@ impl ActivityQueueTrait for ActivityQueue {
         Ok(())
     }
 
+    /// Handle a failed activity by either scheduling a retry with exponential backoff or moving it to the dead-letter queue.
+    ///
+    /// If `retryable` is false the activity status is set to `Failed`. If `retryable` is true and the activity has
+    /// remaining retries (either `max_retries == 0` meaning unlimited or `retry_count < max_retries`), the function
+    /// increments `retry_count`, sets the status to `Retrying`, computes an exponential backoff delay as
+    /// `retry_delay_seconds * 2.pow(retry_count)`, sets `scheduled_at` to now + delay, and schedules the activity.
+    /// When retries are exhausted the status is set to `DeadLetter` and the activity is pushed to the dead-letter queue.
+    ///
+    /// Returns `Ok(())` on success or a `WorkerError::QueueError` if underlying Redis operations fail.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use chrono::Utc;
+    /// # use tokio_test::block_on;
+    /// # async fn doc_example(queue: &crate::queue::ActivityQueue) {
+    /// let activity = crate::Activity {
+    ///     id: "a1".to_string(),
+    ///     retry_count: 0,
+    ///     max_retries: 3,
+    ///     retry_delay_seconds: 5,
+    ///     status: crate::ActivityStatus::Pending,
+    ///     created_at: Utc::now(),
+    ///     scheduled_at: None,
+    ///     priority: crate::Priority::Normal,
+    ///     payload: serde_json::json!({}),
+    /// };
+    /// let _ = queue.mark_failed(activity, "transient error".to_string(), true).await;
+    /// # }
+    /// ```
     async fn mark_failed(
         &self,
         activity: Activity,
@@ -322,6 +492,33 @@ impl ActivityQueueTrait for ActivityQueue {
         Ok(())
     }
 
+    /// Schedule an activity for future execution by adding it to the Redis `scheduled_activities` ZSET.
+    ///
+    /// The activity is serialized to JSON and inserted into the `scheduled_activities` sorted set with
+    /// the Unix timestamp (seconds) from `activity.scheduled_at` as the score. If `scheduled_at` is
+    /// `None`, the current UTC time is used instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WorkerError::QueueError` when acquiring a Redis connection or performing Redis
+    /// operations fails, and when activity serialization fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use chrono::Utc;
+    /// # use uuid::Uuid;
+    /// # async fn example(queue: &impl crate::queue::ActivityQueueTrait) -> Result<(), crate::errors::WorkerError> {
+    /// let activity = crate::queue::Activity {
+    ///     id: Uuid::new_v4(),
+    ///     created_at: Utc::now(),
+    ///     scheduled_at: Some(Utc::now()),
+    ///     // ... other fields ...
+    /// };
+    /// queue.schedule_activity(activity).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     async fn schedule_activity(&self, activity: Activity) -> Result<(), WorkerError> {
         let mut conn = self.redis_pool.get().await.map_err(|e| {
             WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
@@ -344,6 +541,30 @@ impl ActivityQueueTrait for ActivityQueue {
         Ok(())
     }
 
+    /// Process scheduled activities whose scheduled time has arrived.
+    ///
+    /// This fetches up to 100 entries from the `scheduled_activities` sorted set with scores up to the current
+    /// Unix timestamp, removes each found entry from the scheduled set, deserializes it into an `Activity`,
+    /// sets its status to `Pending`, re-enqueues it on the main priority queue, and returns the list of
+    /// activities that were successfully processed.
+    ///
+    /// Parsing errors for individual scheduled entries are logged and skipped; Redis and enqueue failures
+    /// propagate as `WorkerError::QueueError`.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<Activity>` containing the activities that were processed and re-enqueued.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use your_crate::{ActivityQueue, WorkerError};
+    /// # async fn example(queue: ActivityQueue) -> Result<(), WorkerError> {
+    /// let ready = queue.process_scheduled_activities().await?;
+    /// // ready now holds activities whose scheduled time has arrived and have been re-enqueued
+    /// # Ok(())
+    /// # }
+    /// ```
     async fn process_scheduled_activities(&self) -> Result<Vec<Activity>, WorkerError> {
         let mut conn = self.redis_pool.get().await.map_err(|e| {
             WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
@@ -386,7 +607,27 @@ impl ActivityQueueTrait for ActivityQueue {
         Ok(ready_activities)
     }
 
-    /// Get queue statistics with improved performance
+    /// Returns aggregated queue statistics (counts) for the Redis-backed activity queue.
+    ///
+    /// This queries Redis for:
+    /// - total pending activities in the main priority ZSET,
+    /// - per-priority counts computed by ZSET score ranges (Critical/High/Normal/Low),
+    /// - number of scheduled activities in the `scheduled_activities` ZSET,
+    /// - number of entries in the `dead_letter_queue` list.
+    ///
+    /// The priority counts rely on the queue's score layout:
+    /// Critical: 4_000_000–4_999_999, High: 3_000_000–3_999_999, Normal: 2_000_000–2_999_999, Low: 1_000_000–1_999_999.
+    ///
+    /// Returns a `QueueStats` on success, or a `WorkerError::QueueError` if obtaining a Redis connection or executing Redis commands fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn run_example(queue: &crate::queue::ActivityQueue) {
+    /// let stats = queue.get_stats().await.unwrap();
+    /// println!("pending: {}", stats.pending_activities);
+    /// # }
+    /// ```
     async fn get_stats(&self) -> Result<QueueStats, WorkerError> {
         let mut conn = self.redis_pool.get().await.map_err(|e| {
             WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
@@ -417,6 +658,30 @@ impl ActivityQueueTrait for ActivityQueue {
         })
     }
 
+    /// Store an activity's result in Redis under the key `result:<activity_id>` with a 24-hour TTL.
+    ///
+    /// The `result` is serialized to JSON and written to Redis. On success returns `Ok(())`.
+    /// On failure, returns `Err(WorkerError::QueueError)` for Redis/connection issues or
+    /// serialization errors.
+    ///
+    /// # Parameters
+    /// - `activity_id`: UUID used to construct the Redis key `result:<activity_id>`.
+    /// - `result`: The ActivityResult to serialize and persist.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use uuid::Uuid;
+    /// # async fn doc_example(queue: &crate::queue::ActivityQueue) -> Result<(), crate::WorkerError> {
+    /// let id = Uuid::new_v4();
+    /// let result = crate::queue::ActivityResult {
+    ///     data: None,
+    ///     state: crate::queue::ResultState::Ok,
+    /// };
+    /// queue.store_result(id, result).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     async fn store_result(
         &self,
         activity_id: uuid::Uuid,
@@ -436,6 +701,25 @@ impl ActivityQueueTrait for ActivityQueue {
         Ok(())
     }
 
+    /// Retrieves a previously stored activity result by activity ID.
+    ///
+    /// Returns `Ok(Some(ActivityResult))` if a serialized result exists for `activity_id`,
+    /// `Ok(None)` if no result is stored, or an error if Redis access or JSON deserialization fails.
+    /// Errors are returned as `WorkerError::QueueError`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use uuid::Uuid;
+    /// # use my_crate::queue::ActivityQueue;
+    /// # #[tokio::test]
+    /// # async fn example_get_result() {
+    /// let queue = /* ActivityQueue::new(...) */ unimplemented!();
+    /// let id = Uuid::new_v4();
+    /// let res = queue.get_result(id).await;
+    /// // `res` will be `Ok(None)` if no result was stored for `id`.
+    /// # }
+    /// ```
     async fn get_result(
         &self,
         activity_id: uuid::Uuid,
