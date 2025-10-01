@@ -374,6 +374,11 @@ impl WorkerEngine {
     pub fn register_activity(&mut self, activity_type: String, activity: Arc<dyn ActivityHandler>) {
         self.activity_handlers.insert(activity_type, activity);
     }
+    pub fn get_activity_executor(&self) -> Arc<dyn ActivityExecutor> {
+        Arc::new(WorkerEngineWrapper {
+            activity_queue: self.activity_queue.clone(),
+        })
+    }
 }
 
 #[async_trait::async_trait]
