@@ -51,14 +51,6 @@ impl From<RedisError> for WorkerError {
 
 impl WorkerError {
     pub fn is_retryable(&self) -> bool {
-        match self {
-            WorkerError::QueueError(_) => true,
-            WorkerError::RedisError(_) => true,
-            WorkerError::DatabaseError(_) => true,
-            WorkerError::Timeout => true,
-            WorkerError::ExecutionError(_) => true,
-            WorkerError::SchedulingError(_) => true,
-            _ => false,
-        }
+        matches!(self, WorkerError::QueueError(_) | WorkerError::RedisError(_) | WorkerError::DatabaseError(_) | WorkerError::Timeout | WorkerError::ExecutionError(_) | WorkerError::SchedulingError(_))
     }
 }

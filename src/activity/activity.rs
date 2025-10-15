@@ -11,19 +11,15 @@ use uuid::Uuid;
 use super::error::ActivityError;
 
 /// Activity priority levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,Default)]
 pub enum ActivityPriority {
     Low = 1,
+    #[default]
     Normal = 2,
     High = 3,
     Critical = 4,
 }
 
-impl Default for ActivityPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 /// Activity status tracking
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -44,7 +40,7 @@ pub struct ActivityOption {
 }
 
 /// Represents an Activity to be processed
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)] 
 pub(crate) struct Activity {
     pub id: Uuid,
     pub activity_type: String,
@@ -86,7 +82,7 @@ impl Activity {
             created_at: chrono::Utc::now(),
             scheduled_at: scheduled_at.map(|timestamp| {
                 chrono::DateTime::from_timestamp(timestamp as i64, 0)
-                    .unwrap_or_else(|| chrono::Utc::now())
+                    .unwrap_or_else(chrono::Utc::now)
             }),
             retry_count: 0,
             max_retries,
