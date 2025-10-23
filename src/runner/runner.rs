@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{watch, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
+use tokio_util::sync::CancellationToken;
 
 /// Optional metrics sink to expose counters without coupling to a specific backend.
 pub trait MetricsSink: Send + Sync + 'static {
@@ -57,6 +58,7 @@ pub struct WorkerEngine {
     config: WorkerConfig,
     running: Arc<RwLock<bool>>, // retains external visibility
     shutdown_tx: watch::Sender<bool>,
+    cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsSink>,
 }
 
@@ -69,6 +71,7 @@ impl WorkerEngine {
             config,
             running: Arc::new(RwLock::new(false)),
             shutdown_tx,
+            cancel_token: CancellationToken::new(),
             metrics: Arc::new(NoopMetrics),
         }
     }
@@ -170,6 +173,7 @@ impl WorkerEngine {
         *running = false;
         // broadcast shutdown
         let _ = self.shutdown_tx.send(true);
+        self.cancel_token.cancel();
     }
 
     /// Spawns a background worker loop that continuously dequeues and executes activities.
@@ -229,6 +233,7 @@ impl WorkerEngine {
         let activity_handlers = self.activity_handlers.clone();
         let activity_queue_for_context = self.activity_queue.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let cancel_token = self.cancel_token.clone();
         let metrics = self.metrics.clone();
 
         tokio::spawn(async move {
@@ -311,6 +316,7 @@ impl WorkerEngine {
                     activity_type: activity_type.clone(),
                     retry_count: activity.retry_count,
                     metadata: activity.metadata.clone(),
+                    cancel_token: cancel_token.child_token(),
                     worker_engine: Arc::new(WorkerEngineWrapper {
                         activity_queue: activity_queue_for_context.clone(),
                     }),
@@ -499,8 +505,6 @@ impl WorkerEngine {
             _ = terminate => { info!("Received SIGTERM signal"); },
         }
 
-        // broadcast shutdown (idempotent)
-        let _ = self.shutdown_tx.send(true);
         self.stop().await;
     }
 }

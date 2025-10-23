@@ -6,6 +6,7 @@ use crate::WorkerError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 // Import error handling types
 use super::error::ActivityError;
@@ -103,6 +104,7 @@ pub struct ActivityContext {
     pub activity_type: String,
     pub retry_count: u32,
     pub metadata: HashMap<String, String>,
+    pub cancel_token: CancellationToken,
     pub worker_engine: Arc<dyn ActivityExecutor>,
 }
 
