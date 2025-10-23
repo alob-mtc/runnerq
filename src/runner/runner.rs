@@ -294,6 +294,12 @@ impl WorkerEngine {
                     Some(h) => h.clone(),
                     None => {
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "No handler found for activity type");
+                        if let Err(e) = activity_queue
+                            .mark_failed(activity, "handler_not_found".to_string(), false)
+                            .await
+                        {
+                            error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
+                        }
                         drop(permit);
                         continue;
                     }
@@ -440,11 +446,14 @@ impl WorkerEngine {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         // Make poll interval configurable; default to 30s if config lacks it.
-        let poll_interval = self
-            .config
-            .schedule_poll_interval_seconds
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(30));
+        let poll_interval = {
+            let secs = self
+                .config
+                .schedule_poll_interval_seconds
+                .unwrap_or(30)
+                .max(1);
+            Duration::from_secs(secs)
+        };
 
         tokio::spawn(async move {
             debug!("Starting scheduled activities processor");
