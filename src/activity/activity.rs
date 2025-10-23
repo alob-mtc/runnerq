@@ -40,7 +40,7 @@ pub struct ActivityOption {
     pub priority: Option<ActivityPriority>,
     pub max_retries: u32,
     pub timeout_seconds: u64,
-    pub scheduled_at: Option<u64>,
+    pub delay_seconds: Option<u64>,
 }
 
 /// Represents an Activity to be processed
@@ -66,12 +66,12 @@ impl Activity {
         payload: serde_json::Value,
         option: Option<ActivityOption>,
     ) -> Self {
-        let (priority, max_retries, timeout_seconds, scheduled_at) = if let Some(opt) = option {
+        let (priority, max_retries, timeout_seconds, delay_seconds) = if let Some(opt) = option {
             (
                 opt.priority.unwrap_or(ActivityPriority::default()),
                 opt.max_retries,
                 opt.timeout_seconds,
-                opt.scheduled_at,
+                opt.delay_seconds,
             )
         } else {
             (ActivityPriority::default(), 3, 300, None)
@@ -84,7 +84,7 @@ impl Activity {
             priority,
             status: ActivityStatus::Pending,
             created_at: chrono::Utc::now(),
-            scheduled_at: scheduled_at.map(|delay_seconds| {
+            scheduled_at: delay_seconds.map(|delay_seconds| {
                 chrono::Utc::now() + chrono::Duration::seconds(delay_seconds as i64)
             }),
             retry_count: 0,
