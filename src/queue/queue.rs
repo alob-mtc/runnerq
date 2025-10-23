@@ -361,7 +361,7 @@ impl ActivityQueueTrait for ActivityQueue {
         // Use Lua script for atomic dequeue operation with timeout simulation
         // Since Redis doesn't have BZPOPMAX with timeout, we'll implement polling with exponential backoff
         let start_time = std::time::Instant::now();
-        let mut sleep_duration = std::time::Duration::from_millis(10);
+        let mut sleep_duration = Duration::from_millis(10);
 
         while start_time.elapsed() < timeout {
             // Try to pop highest priority item (highest score first)
@@ -394,7 +394,7 @@ impl ActivityQueueTrait for ActivityQueue {
             // No activities available, wait with exponential backoff
             tokio::time::sleep(sleep_duration).await;
             sleep_duration =
-                std::cmp::min(sleep_duration * 2, std::time::Duration::from_millis(1000));
+                std::cmp::min(sleep_duration * 2, Duration::from_millis(1000));
         }
 
         Ok(None) // Timeout

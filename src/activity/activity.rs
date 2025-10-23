@@ -84,9 +84,8 @@ impl Activity {
             priority,
             status: ActivityStatus::Pending,
             created_at: chrono::Utc::now(),
-            scheduled_at: scheduled_at.map(|timestamp| {
-                chrono::DateTime::from_timestamp(timestamp as i64, 0)
-                    .unwrap_or_else(|| chrono::Utc::now())
+            scheduled_at: scheduled_at.map(|delay_seconds| {
+                chrono::Utc::now() + chrono::Duration::seconds(delay_seconds as i64)
             }),
             retry_count: 0,
             max_retries,

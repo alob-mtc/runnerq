@@ -104,8 +104,8 @@
 //!         })
 //!     ).await?;
 //!
-//!     // Schedule an activity for future execution (1 hour from now)
-//!     let one_hour_later = chrono::Utc::now().timestamp() + 3600;
+//!     // Schedule an activity for future execution (10 seconds from now)
+//!     let delay_seconds = 10;
 //!     let scheduled_future = worker_engine.execute_activity(
 //!         MyActivityType::SendEmail.to_string(),
 //!         serde_json::json!({"to": "user@example.com", "subject": "Reminder"}),
@@ -113,7 +113,7 @@
 //!             priority: Some(ActivityPriority::Normal),
 //!             max_retries: 3,
 //!             timeout_seconds: 300,
-//!             scheduled_at: Some(one_hour_later as u64),
+//!             scheduled_at: Some(delay_seconds as u64),
 //!         })
 //!     ).await?;
 //!
