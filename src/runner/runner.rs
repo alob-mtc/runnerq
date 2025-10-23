@@ -2,20 +2,23 @@ use crate::activity::activity::{ActivityFuture, ActivityHandlerRegistry, Activit
 use crate::config::WorkerConfig;
 use crate::queue::queue::{ActivityQueueTrait, ActivityResult, ResultState};
 use crate::runner::error::WorkerError;
-use crate::{activity::activity::Activity, ActivityContext, ActivityError, ActivityHandler, ActivityQueue};
+use crate::{
+    activity::activity::Activity, ActivityContext, ActivityError, ActivityHandler, ActivityQueue,
+};
 use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use chrono::{DateTime, Utc};
-use tokio::sync::{RwLock, Semaphore, watch};
+use tokio::sync::{watch, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 
 /// Optional metrics sink to expose counters without coupling to a specific backend.
 pub trait MetricsSink: Send + Sync + 'static {
     fn inc_counter(&self, name: &str, value: u64);
-    fn observe_duration(&self, _name: &str, _dur: Duration) { let _ = (_name, _dur); }
+    fn observe_duration(&self, _name: &str, _dur: Duration) {
+        let _ = (_name, _dur);
+    }
 }
 
 /// No-op metrics sink
@@ -31,8 +34,16 @@ struct Backoff {
     max: Duration,
 }
 impl Backoff {
-    fn new(base: Duration, max: Duration) -> Self { Self { current: base, base, max } }
-    fn reset(&mut self) { self.current = self.base; }
+    fn new(base: Duration, max: Duration) -> Self {
+        Self {
+            current: base,
+            base,
+            max,
+        }
+    }
+    fn reset(&mut self) {
+        self.current = self.base;
+    }
     fn next(&mut self) -> Duration {
         let next = self.current;
         self.current = (self.current.mul_f32(2.0)).min(self.max);
@@ -50,10 +61,7 @@ pub struct WorkerEngine {
 }
 
 impl WorkerEngine {
-    pub fn new(
-        redis_pool: Pool<RedisConnectionManager>,
-        config: WorkerConfig,
-    ) -> Self {
+    pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         Self {
             activity_queue: Arc::new(ActivityQueue::new(redis_pool, config.queue_name.clone())),
@@ -67,7 +75,8 @@ impl WorkerEngine {
 
     /// Optionally plug in a metrics sink.
     pub fn with_metrics(mut self, sink: Arc<dyn MetricsSink>) -> Self {
-        self.metrics = sink; self
+        self.metrics = sink;
+        self
     }
 
     /// Starts the worker engine with:
@@ -77,11 +86,16 @@ impl WorkerEngine {
     pub async fn start(&self) -> Result<(), WorkerError> {
         {
             let mut running = self.running.write().await;
-            if *running { return Err(WorkerError::AlreadyRunning); }
+            if *running {
+                return Err(WorkerError::AlreadyRunning);
+            }
             *running = true;
         }
 
-        info!(max_concurrent_activities = self.config.max_concurrent_activities, "Starting worker engine");
+        info!(
+            max_concurrent_activities = self.config.max_concurrent_activities,
+            "Starting worker engine"
+        );
 
         let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent_activities));
         let mut join_handles = Vec::new();
@@ -141,7 +155,9 @@ impl WorkerEngine {
 
             while *running.read().await {
                 // Honor fast shutdown
-                if *shutdown_rx.borrow() { break; }
+                if *shutdown_rx.borrow() {
+                    break;
+                }
 
                 // Acquire permit (bounded concurrency)
                 let permit = match semaphore.try_acquire() {
@@ -163,7 +179,10 @@ impl WorkerEngine {
                 };
 
                 let activity = match activity_opt {
-                    Ok(Some(a)) => { backoff.reset(); a }
+                    Ok(Some(a)) => {
+                        backoff.reset();
+                        a
+                    }
                     Ok(None) => {
                         drop(permit);
                         let sleep_for = backoff.next();
@@ -204,7 +223,9 @@ impl WorkerEngine {
                     activity_type: activity_type.clone(),
                     retry_count: activity.retry_count,
                     metadata: activity.metadata.clone(),
-                    worker_engine: Arc::new(WorkerEngineWrapper { activity_queue: activity_queue_for_context.clone() }),
+                    worker_engine: Arc::new(WorkerEngineWrapper {
+                        activity_queue: activity_queue_for_context.clone(),
+                    }),
                 };
 
                 let activity_timeout = Duration::from_secs(activity.timeout_seconds);
@@ -229,7 +250,10 @@ impl WorkerEngine {
 
                         // Store result (fire-and-forget to avoid blocking the worker on slow I/O)
                         let aq = activity_queue.clone();
-                        let result_to_store = ActivityResult { data: value, state: ResultState::Ok };
+                        let result_to_store = ActivityResult {
+                            data: value,
+                            state: ResultState::Ok,
+                        };
                         tokio::spawn(async move {
                             if let Err(e) = aq.store_result(activity_id, result_to_store).await {
                                 error!(activity_id = %activity_id, error = %e, "Failed to store activity result");
@@ -246,7 +270,10 @@ impl WorkerEngine {
                     Ok(Err(ActivityError::NonRetry(reason))) => {
                         metrics.inc_counter("activity_failed_non_retry", 1);
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity failed");
-                        if let Err(e) = activity_queue.mark_failed(activity, reason.clone(), false).await {
+                        if let Err(e) = activity_queue
+                            .mark_failed(activity, reason.clone(), false)
+                            .await
+                        {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
                         }
                         let aq = activity_queue.clone();
@@ -268,7 +295,8 @@ impl WorkerEngine {
                         metrics.inc_counter("activity_timeout", 1);
                         let error_msg = "Activity execution timed out".to_string();
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, timeout = ?activity_timeout, "Activity timed out");
-                        if let Err(e) = activity_queue.mark_failed(activity, error_msg, true).await {
+                        if let Err(e) = activity_queue.mark_failed(activity, error_msg, true).await
+                        {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
                         }
                     }
@@ -282,7 +310,9 @@ impl WorkerEngine {
         })
     }
 
-    async fn start_scheduled_activities_processor(&self) -> tokio::task::JoinHandle<Result<(), WorkerError>> {
+    async fn start_scheduled_activities_processor(
+        &self,
+    ) -> tokio::task::JoinHandle<Result<(), WorkerError>> {
         let activity_queue = self.activity_queue.clone();
         let running = self.running.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
@@ -297,7 +327,9 @@ impl WorkerEngine {
         tokio::spawn(async move {
             debug!("Starting scheduled activities processor");
             while *running.read().await {
-                if *shutdown_rx.borrow() { break; }
+                if *shutdown_rx.borrow() {
+                    break;
+                }
 
                 if let Err(e) = activity_queue.process_scheduled_activities().await {
                     error!(error = %e, "Failed to process scheduled activities");
@@ -315,13 +347,16 @@ impl WorkerEngine {
 
     async fn wait_for_shutdown(&self) {
         let ctrl_c = async {
-            tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
         };
 
         #[cfg(unix)]
         let terminate = async {
             use tokio::signal::unix::{signal, SignalKind};
-            let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
             sigterm.recv().await;
         };
 
@@ -350,9 +385,12 @@ impl WorkerEngine {
         let activity_id = activity.id;
         match activity.scheduled_at {
             None => self.activity_queue.enqueue(activity).await?,
-            Some(_) => self.activity_queue.schedule_activity(activity).await?
+            Some(_) => self.activity_queue.schedule_activity(activity).await?,
         }
-        Ok(ActivityFuture::new(self.activity_queue.clone(), activity_id))
+        Ok(ActivityFuture::new(
+            self.activity_queue.clone(),
+            activity_id,
+        ))
     }
 
     pub fn register_activity(&mut self, activity_type: String, activity: Arc<dyn ActivityHandler>) {
@@ -360,7 +398,9 @@ impl WorkerEngine {
     }
 
     pub fn get_activity_executor(&self) -> Arc<dyn ActivityExecutor> {
-        Arc::new(WorkerEngineWrapper { activity_queue: self.activity_queue.clone() })
+        Arc::new(WorkerEngineWrapper {
+            activity_queue: self.activity_queue.clone(),
+        })
     }
 }
 
@@ -375,7 +415,9 @@ pub trait ActivityExecutor: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct WorkerEngineWrapper { activity_queue: Arc<dyn ActivityQueueTrait> }
+pub struct WorkerEngineWrapper {
+    activity_queue: Arc<dyn ActivityQueueTrait>,
+}
 
 #[async_trait::async_trait]
 impl ActivityExecutor for WorkerEngineWrapper {
@@ -389,8 +431,11 @@ impl ActivityExecutor for WorkerEngineWrapper {
         let activity_id = activity.id;
         match activity.scheduled_at {
             None => self.activity_queue.enqueue(activity).await?,
-            Some(_) => self.activity_queue.schedule_activity(activity).await?
+            Some(_) => self.activity_queue.schedule_activity(activity).await?,
         }
-        Ok(ActivityFuture::new(self.activity_queue.clone(), activity_id))
+        Ok(ActivityFuture::new(
+            self.activity_queue.clone(),
+            activity_id,
+        ))
     }
 }

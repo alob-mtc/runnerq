@@ -393,8 +393,7 @@ impl ActivityQueueTrait for ActivityQueue {
 
             // No activities available, wait with exponential backoff
             tokio::time::sleep(sleep_duration).await;
-            sleep_duration =
-                std::cmp::min(sleep_duration * 2, Duration::from_millis(1000));
+            sleep_duration = std::cmp::min(sleep_duration * 2, Duration::from_millis(1000));
         }
 
         Ok(None) // Timeout
