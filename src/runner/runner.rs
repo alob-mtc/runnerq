@@ -79,10 +79,45 @@ impl WorkerEngine {
         self
     }
 
-    /// Starts the worker engine with:
-    /// - cancellation via `watch` channel (fast shutdown)
-    /// - exponential backoff on empty dequeues
-    /// - configurable schedule poll interval (default 30s if not in config)
+    /// Starts the worker engine and manages its full execution lifecycle.
+    ///
+    /// This method performs the following steps:
+    /// - Verifies that the engine is not already running, returning `WorkerError::AlreadyRunning` if it is.
+    /// - Marks the engine as active and initializes a semaphore to cap concurrent activity execution
+    ///   at `config.max_concurrent_activities`.
+    /// - Spawns both:
+    ///   - a background task that periodically processes scheduled activities, and
+    ///   - a pool of worker loops (one per available concurrency slot) that dequeue and execute activities.
+    /// - Awaits either:
+    ///   - a shutdown signal (Ctrl+C or SIGTERM), or
+    ///   - the completion or failure of any worker loop.
+    /// - Once a shutdown signal is received, transitions the engine into graceful stop mode,
+    ///   halting new activity execution and allowing in-flight work to complete before cleanup.
+    ///
+    /// # Behavior
+    ///
+    /// - The method runs until the engine is explicitly stopped or a shutdown signal is received.
+    /// - When it returns, the engine is fully stopped and resources have been released.
+    /// - If the engine was already running, it immediately returns `Err(WorkerError::AlreadyRunning)`.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — the engine shut down cleanly.
+    /// - `Err(WorkerError::AlreadyRunning)` — start was attempted while another instance was active.
+    /// - Other `WorkerError` variants — internal initialization or runtime failures.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # async fn example() -> Result<(), WorkerError> {
+    /// // Initialize the engine (pseudo-code)
+    /// let engine = WorkerEngine::new(redis_pool, config);
+    ///
+    /// // Start processing activities — this call will block until shutdown
+    /// engine.start().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn start(&self) -> Result<(), WorkerError> {
         {
             let mut running = self.running.write().await;
@@ -137,6 +172,53 @@ impl WorkerEngine {
         let _ = self.shutdown_tx.send(true);
     }
 
+    /// Spawns a background worker loop that continuously dequeues and executes activities.
+    ///
+    /// Each worker operates independently and performs the following cycle while the engine is running:
+    /// - Acquires a permit from the provided semaphore to enforce the global concurrency limit.
+    /// - Attempts to dequeue an activity from the queue (waiting briefly if none are available).
+    /// - Looks up the registered handler for the dequeued activity type.
+    /// - Executes the handler with a per-activity timeout, passing in an `ActivityContext` containing
+    ///   metadata and a reference back to the engine for nested execution.
+    /// - Records the outcome through the activity queue:
+    ///   - **Success:** Marks the activity as completed and stores the result with `ResultState::Ok`.
+    ///   - **Retryable failure (`ActivityError::Retry`)**: Marks the activity as failed and eligible for retry.
+    ///   - **Non-retryable failure (`ActivityError::NonRetry`)**: Marks the activity as permanently failed and
+    ///     stores a structured JSON error (`{"error": <reason>, "type": "non_retryable", "failed_at": <RFC3339>}`).
+    ///   - **Timeout:** If execution exceeds its allowed duration, the activity is marked as failed and retried.
+    ///
+    /// The worker loop terminates when:
+    /// - The engine’s running flag is cleared (via `stop()`), or
+    /// - A shutdown signal is received through cooperative cancellation.
+    ///
+    /// Upon termination, any ongoing work completes its current iteration before the worker exits.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`tokio::task::JoinHandle`] wrapping the background worker task.
+    /// The handle can be awaited to monitor completion or detached to run in the background.
+    ///
+    /// # Notes
+    ///
+    /// - This function does not block; it spawns a background task and immediately returns.
+    /// - Each worker is lightweight and safe to run concurrently; the semaphore ensures that
+    ///   the total number of active activities never exceeds the configured concurrency limit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use tokio::sync::Semaphore;
+    /// # async fn example(engine: &crate::runner::WorkerEngine) {
+    /// let semaphore = Arc::new(Semaphore::new(4));
+    ///
+    /// // Spawn a worker loop with ID 0
+    /// let handle = engine.start_worker_loop(0, semaphore.clone()).await;
+    ///
+    /// // The returned JoinHandle runs until the engine stops or a shutdown signal is received.
+    /// handle.await.ok();
+    /// # }
+    /// ```
     async fn start_worker_loop(
         &self,
         worker_id: usize,
@@ -310,6 +392,46 @@ impl WorkerEngine {
         })
     }
 
+    /// Spawns a background processor that periodically executes scheduled activities.
+    ///
+    /// This task runs continuously while the engine remains active, performing the following loop:
+    /// - Calls [`process_scheduled_activities()`] on the engine’s activity queue to identify and enqueue
+    ///   any activities whose scheduled execution time has arrived.
+    /// - Logs any errors encountered during processing but continues operation.
+    /// - Waits for a fixed interval (default: 30 seconds, configurable via `config.schedule_poll_interval_seconds`)
+    ///   before repeating the cycle.
+    ///
+    /// The processor automatically stops when:
+    /// - The engine’s running flag is cleared (via [`stop()`]), or
+    /// - A shutdown signal is received through cooperative cancellation.
+    ///
+    /// This mechanism ensures that time-delayed or recurring activities are regularly promoted
+    /// into the execution queue for handling by worker loops.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`tokio::task::JoinHandle`] representing the spawned background processor.
+    /// The handle can be:
+    /// - **awaited**, to wait for graceful completion; or
+    /// - **aborted**, to terminate the processor immediately.
+    ///
+    /// # Notes
+    ///
+    /// - Failures during scheduled-activity processing are logged and do not halt the engine.
+    /// - The polling interval can be tuned through the worker configuration to balance responsiveness and load.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assuming `engine` is an initialized WorkerEngine instance:
+    /// let handle = engine.start_scheduled_activities_processor().await;
+    ///
+    /// // The processor runs in the background until the engine stops.
+    /// // You may choose to abort or await it as needed:
+    /// handle.abort();
+    /// // or
+    /// handle.await.ok();
+    /// ```
     async fn start_scheduled_activities_processor(
         &self,
     ) -> tokio::task::JoinHandle<Result<(), WorkerError>> {
