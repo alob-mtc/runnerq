@@ -1,5 +1,5 @@
 use crate::worker::WorkerError;
-use crate::{activity::activity::Activity, ActivityPriority, ActivityStatus};
+use crate::{activity::activity::{Activity,ActivityStatus}, ActivityPriority};
 use async_trait::async_trait;
 use bb8_redis::{bb8::Pool, RedisConnectionManager};
 use redis::AsyncCommands;

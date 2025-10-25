@@ -1,6 +1,6 @@
 [package]
 name = "runner_q"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
 authors = ["Akinlua Bolamigbe bolamigbeakinlua@gmail.com"]
 description = "Redis-based activity queue and worker system"
@@ -24,3 +24,4 @@ tracing = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
 tokio-util = "0.7.16"
+anyhow = "1.0"

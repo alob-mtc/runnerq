@@ -1,7 +1,8 @@
-use crate::activity::activity::{ActivityFuture, ActivityHandlerRegistry, ActivityOption};
+use crate::activity::activity::{ActivityFuture, ActivityHandlerRegistry, ActivityOption, ActivityPriority};
 use crate::config::WorkerConfig;
 use crate::queue::queue::{ActivityQueueTrait, ActivityResult, ResultState};
 use crate::runner::error::WorkerError;
+use crate::runner::redis::{create_redis_pool, create_redis_pool_with_config, RedisConfig};
 use crate::{
     activity::activity::Activity, ActivityContext, ActivityError, ActivityHandler, ActivityQueue,
 };
@@ -15,15 +16,86 @@ use tracing::{debug, error, info, warn};
 use tokio_util::sync::CancellationToken;
 
 /// Optional metrics sink to expose counters without coupling to a specific backend.
+///
+/// This trait allows you to collect metrics about activity processing, including
+/// completion rates, retry counts, and execution times. Implement this trait
+/// to integrate with your preferred metrics system (Prometheus, StatsD, etc.).
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use runner_q::MetricsSink;
+/// use std::time::Duration;
+/// use std::sync::Arc;
+///
+/// // Prometheus metrics implementation
+/// struct PrometheusMetrics {
+///     registry: prometheus::Registry,
+/// }
+///
+/// impl MetricsSink for PrometheusMetrics {
+///     fn inc_counter(&self, name: &str, value: u64) {
+///         // Increment Prometheus counter
+///         let counter = prometheus::Counter::new(name, "Activity processing counter").unwrap();
+///         counter.inc_by(value as f64);
+///     }
+///     
+///     fn observe_duration(&self, name: &str, duration: Duration) {
+///         // Record duration histogram
+///         let histogram = prometheus::Histogram::new(name, "Activity execution duration").unwrap();
+///         histogram.observe(duration.as_secs_f64());
+///     }
+/// }
+///
+/// // Simple logging metrics implementation
+/// struct LoggingMetrics;
+///
+/// impl MetricsSink for LoggingMetrics {
+///     fn inc_counter(&self, name: &str, value: u64) {
+///         println!("METRIC: {} += {}", name, value);
+///     }
+///     
+///     fn observe_duration(&self, name: &str, duration: Duration) {
+///         println!("METRIC: {} = {:?}", name, duration);
+///     }
+/// }
+/// ```
 pub trait MetricsSink: Send + Sync + 'static {
+    /// Increment a counter metric by the specified value.
+    ///
+    /// This is typically used for counting events like activity completions,
+    /// retries, failures, etc.
     fn inc_counter(&self, name: &str, value: u64);
+    
+    /// Record a duration metric.
+    ///
+    /// This is typically used for measuring execution times, queue wait times, etc.
+    /// The default implementation is a no-op, so you only need to implement this
+    /// if you want to collect duration metrics.
     fn observe_duration(&self, _name: &str, _dur: Duration) {
         let _ = (_name, _dur);
     }
 }
 
-/// No-op metrics sink
+/// No-op metrics sink that discards all metrics.
+///
+/// This is the default metrics implementation that does nothing with the metrics.
+/// Use this when you don't need metrics collection or as a fallback.
+///
+/// # Examples
+///
+/// ```rust
+/// use runner_q::{NoopMetrics, MetricsSink};
+/// use std::time::Duration;
+///
+/// let metrics = NoopMetrics;
+/// 
+/// // These calls do nothing
+/// metrics.inc_counter("activities_completed", 1);
+/// metrics.observe_duration("activity_execution", Duration::from_secs(5));
+/// ```
 pub struct NoopMetrics;
+
 impl MetricsSink for NoopMetrics {
     fn inc_counter(&self, _name: &str, _value: u64) {}
 }
@@ -63,6 +135,68 @@ pub struct WorkerEngine {
 }
 
 impl WorkerEngine {
+    /// Creates a new WorkerEngine with the given Redis connection pool and configuration.
+    ///
+    /// The engine is created in a stopped state and must be started with [`start()`] to begin
+    /// processing activities. Before starting, you should register activity handlers using
+    /// [`register_activity()`].
+    ///
+    /// # Parameters
+    ///
+    /// * `redis_pool` - Redis connection pool for queue operations
+    /// * `config` - Configuration settings for the worker engine
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use runner_q::{WorkerEngine, WorkerConfig};
+    /// use bb8_redis::bb8::Pool;
+    /// use bb8_redis::RedisConnectionManager;
+    /// use std::sync::Arc;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Create Redis connection pool
+    /// let redis_pool = Pool::builder()
+    ///     .build(RedisConnectionManager::new("redis://127.0.0.1:6379")?)
+    ///     .await?;
+    ///
+    /// // Create configuration
+    /// let config = WorkerConfig {
+    ///     queue_name: "my_app".to_string(),
+    ///     max_concurrent_activities: 10,
+    ///     redis_url: "redis://127.0.0.1:6379".to_string(),
+    ///     schedule_poll_interval_seconds: Some(30),
+    /// };
+    ///
+    /// // Create worker engine
+    /// let mut worker_engine = WorkerEngine::new(redis_pool, config);
+    ///
+    /// // Register activity handlers before starting
+    /// // worker_engine.register_activity("send_email".to_string(), Arc::new(EmailHandler));
+    ///
+    /// // Start the engine (this will block until shutdown)
+    /// // worker_engine.start().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// For a more ergonomic API, consider using the builder pattern:
+    ///
+    /// ```rust,no_run
+    /// use runner_q::WorkerEngine;
+    /// use std::time::Duration;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let engine = WorkerEngine::builder()
+    ///     .redis_url("redis://localhost:6379")
+    ///     .queue_name("my_app")
+    ///     .max_workers(10)
+    ///     .schedule_poll_interval(Duration::from_secs(30))
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         Self {
@@ -76,11 +210,58 @@ impl WorkerEngine {
         }
     }
 
-    /// Optionally plug in a metrics sink.
-    pub fn with_metrics(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+    pub fn with_metrics(&mut self, sink: Arc<dyn MetricsSink>) {
         self.metrics = sink;
-        self
     }
+
+    /// Creates a new WorkerEngineBuilder for fluent configuration.
+    ///
+    /// This provides a more ergonomic API for configuring the WorkerEngine with method chaining.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use runner_q::WorkerEngine;
+    /// use std::time::Duration;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let engine = WorkerEngine::builder()
+    ///     .redis_url("redis://localhost:6379")
+    ///     .queue_name("my_app")
+    ///     .max_workers(8)
+    ///     .schedule_poll_interval(Duration::from_secs(30))
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// 
+    /// // With custom Redis configuration
+    /// # async fn example_with_redis_config() -> Result<(), Box<dyn std::error::Error>> {
+    /// use runner_q::RedisConfig;
+    /// 
+    /// let redis_config = RedisConfig {
+    ///     max_size: 100,
+    ///     min_idle: 10,
+    ///     conn_timeout: Duration::from_secs(60),
+    ///     idle_timeout: Duration::from_secs(600),
+    ///     max_lifetime: Duration::from_secs(3600),
+    /// };
+    /// 
+    /// let engine = WorkerEngine::builder()
+    ///     .redis_url("redis://localhost:6379")
+    ///     .queue_name("my_app")
+    ///     .max_workers(8)
+    ///     .redis_config(redis_config)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn builder() -> WorkerEngineBuilder {
+        WorkerEngineBuilder::new()
+    }
+
+
 
     /// Starts the worker engine and manages its full execution lifecycle.
     ///
@@ -166,7 +347,43 @@ impl WorkerEngine {
         Ok(())
     }
 
-    /// Signal a graceful stop.
+    /// Signal a graceful stop of the worker engine.
+    ///
+    /// This method initiates a graceful shutdown process:
+    /// - Stops accepting new activities
+    /// - Allows currently running activities to complete
+    /// - Cancels any pending operations
+    /// - Releases resources
+    ///
+    /// The shutdown is cooperative - activities should check the cancellation token
+    /// and exit cleanly when requested.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use runner_q::{WorkerEngine, WorkerConfig};
+    /// use std::sync::Arc;
+    /// use tokio::time::{sleep, Duration};
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut engine = WorkerEngine::new(redis_pool, config);
+    /// 
+    /// // Start the engine in a background task
+    /// let engine_handle = tokio::spawn(async move {
+    ///     engine.start().await
+    /// });
+    /// 
+    /// // Let it run for a while
+    /// sleep(Duration::from_secs(10)).await;
+    /// 
+    /// // Gracefully stop the engine
+    /// engine.stop().await;
+    /// 
+    /// // Wait for the engine to finish
+    /// engine_handle.await??;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn stop(&self) {
         info!("Stopping worker engine");
         let mut running = self.running.write().await;
@@ -317,9 +534,7 @@ impl WorkerEngine {
                     retry_count: activity.retry_count,
                     metadata: activity.metadata.clone(),
                     cancel_token: cancel_token.child_token(),
-                    worker_engine: Arc::new(WorkerEngineWrapper {
-                        activity_queue: activity_queue_for_context.clone(),
-                    }),
+                    activity_executor: Arc::new(WorkerEngineWrapper::new(activity_queue_for_context.clone())),
                 };
 
                 let activity_timeout = Duration::from_secs(activity.timeout_seconds);
@@ -510,52 +725,524 @@ impl WorkerEngine {
 }
 
 impl WorkerEngine {
-    pub async fn execute_activity(
-        &self,
-        activity_type: String,
-        payload: serde_json::Value,
-        option: Option<ActivityOption>,
-    ) -> Result<ActivityFuture, WorkerError> {
-        let activity = Activity::new(activity_type, payload, option);
-        let activity_id = activity.id;
-        match activity.scheduled_at {
-            None => self.activity_queue.enqueue(activity).await?,
-            Some(_) => self.activity_queue.schedule_activity(activity).await?,
-        }
-        Ok(ActivityFuture::new(
-            self.activity_queue.clone(),
-            activity_id,
-        ))
-    }
-
+    /// Register an activity handler for a specific activity type.
+    ///
+    /// This method associates an activity type string with a handler implementation.
+    /// Activities of the registered type will be processed by the provided handler.
+    ///
+    /// # Parameters
+    ///
+    /// * `activity_type` - String identifier for the activity type
+    /// * `activity` - Handler implementation for processing activities of this type
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use runner_q::{WorkerEngine, ActivityHandler, ActivityContext, ActivityHandlerResult};
+    /// use async_trait::async_trait;
+    /// use serde_json::Value;
+    /// use std::sync::Arc;
+    ///
+    /// // Define a custom activity handler
+    /// pub struct EmailHandler;
+    ///
+    /// #[async_trait]
+    /// impl ActivityHandler for EmailHandler {
+    ///     async fn handle(&self, payload: Value, _context: ActivityContext) -> ActivityHandlerResult {
+    ///         println!("Sending email: {:?}", payload);
+    ///         Ok(Some(serde_json::json!({"status": "sent"})))
+    ///     }
+    ///     
+    ///     fn activity_type(&self) -> String {
+    ///         "send_email".to_string()
+    ///     }
+    /// }
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut engine = WorkerEngine::new(redis_pool, config);
+    ///
+    /// // Register the email handler
+    /// engine.register_activity(
+    ///     "send_email".to_string(),
+    ///     Arc::new(EmailHandler)
+    /// );
+    ///
+    /// // Now activities of type "send_email" will be processed by EmailHandler
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn register_activity(&mut self, activity_type: String, activity: Arc<dyn ActivityHandler>) {
         self.activity_handlers.insert(activity_type, activity);
     }
 
+    /// Get an activity executor for orchestrating activities from within handlers.
+    ///
+    /// This method returns an `ActivityExecutor` that can be used by activity handlers
+    /// to execute other activities, enabling complex workflows and activity orchestration.
+    ///
+    /// The returned executor is thread-safe and can be shared across multiple handlers.
+    ///
+    /// # Returns
+    ///
+    /// Returns an `Arc<dyn ActivityExecutor>` that can be used to execute activities.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use runner_q::{WorkerEngine, ActivityHandler, ActivityContext, ActivityHandlerResult, ActivityOption, ActivityPriority};
+    /// use async_trait::async_trait;
+    /// use serde_json::Value;
+    /// use std::sync::Arc;
+    ///
+    /// pub struct OrderProcessingHandler;
+    ///
+    /// #[async_trait]
+    /// impl ActivityHandler for OrderProcessingHandler {
+    ///     async fn handle(&self, payload: Value, context: ActivityContext) -> ActivityHandlerResult {
+    ///         let order_id = payload["order_id"].as_str().unwrap();
+    ///         
+    ///         // Execute payment processing activity
+    ///         let payment_future = context.activity_executor.execute_activity(
+    ///             "process_payment".to_string(),
+    ///             serde_json::json!({"order_id": order_id, "amount": payload["amount"]}),
+    ///             Some(ActivityOption {
+    ///                 priority: Some(ActivityPriority::High),
+    ///                 max_retries: 3,
+    ///                 timeout_seconds: 300,
+    ///                 delay_seconds: None,
+    ///             })
+    ///         ).await?;
+    ///         
+    ///         // Execute inventory update activity
+    ///         let inventory_future = context.activity_executor.execute_activity(
+    ///             "update_inventory".to_string(),
+    ///             serde_json::json!({"order_id": order_id, "items": payload["items"]}),
+    ///             None // Use default options
+    ///         ).await?;
+    ///         
+    ///         Ok(Some(serde_json::json!({
+    ///             "order_id": order_id,
+    ///             "status": "processing",
+    ///             "sub_activities": ["payment", "inventory"]
+    ///         })))
+    ///     }
+    ///     
+    ///     fn activity_type(&self) -> String {
+    ///         "process_order".to_string()
+    ///     }
+    /// }
+    /// ```
     pub fn get_activity_executor(&self) -> Arc<dyn ActivityExecutor> {
-        Arc::new(WorkerEngineWrapper {
-            activity_queue: self.activity_queue.clone(),
-        })
+        Arc::new(WorkerEngineWrapper::new(self.activity_queue.clone()))
     }
 }
 
-#[async_trait::async_trait]
-pub trait ActivityExecutor: Send + Sync {
-    async fn execute_activity(
-        &self,
-        activity_type: String,
-        payload: serde_json::Value,
-        option: Option<ActivityOption>,
-    ) -> Result<ActivityFuture, WorkerError>;
+/// Builder for creating WorkerEngine instances with fluent configuration.
+///
+/// This builder provides a more ergonomic API for configuring the WorkerEngine
+/// with method chaining instead of constructing a WorkerConfig struct directly.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use runner_q::WorkerEngine;
+/// use std::time::Duration;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let engine = WorkerEngine::builder()
+///     .redis_url("redis://localhost:6379")
+///     .queue_name("my_app")
+///     .max_workers(8)
+///     .schedule_poll_interval(Duration::from_secs(30))
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct WorkerEngineBuilder {
+    redis_url: Option<String>,
+    queue_name: Option<String>,
+    max_workers: Option<usize>,
+    schedule_poll_interval: Option<Duration>,
+    redis_config: Option<RedisConfig>,
+    metrics: Option<Arc<dyn MetricsSink>>,
 }
 
+impl WorkerEngineBuilder {
+    /// Creates a new WorkerEngineBuilder with default values.
+    pub fn new() -> Self {
+        Self {
+            redis_url: None,
+            queue_name: None,
+            max_workers: None,
+            schedule_poll_interval: None,
+            redis_config: None,
+            metrics: None,
+        }
+    }
+
+    /// Sets the Redis URL for the worker engine.
+    ///
+    /// # Parameters
+    ///
+    /// * `url` - Redis connection URL (e.g., "redis://localhost:6379")
+    pub fn redis_url(mut self, url: &str) -> Self {
+        self.redis_url = Some(url.to_string());
+        self
+    }
+
+    /// Sets the queue name for the worker engine.
+    ///
+    /// # Parameters
+    ///
+    /// * `name` - Queue name used as Redis key prefix
+    pub fn queue_name(mut self, name: &str) -> Self {
+        self.queue_name = Some(name.to_string());
+        self
+    }
+
+    /// Sets the maximum number of concurrent workers.
+    ///
+    /// # Parameters
+    ///
+    /// * `max` - Maximum number of concurrent activities
+    pub fn max_workers(mut self, max: usize) -> Self {
+        self.max_workers = Some(max);
+        self
+    }
+
+    /// Sets the schedule poll interval for processing scheduled activities.
+    ///
+    /// # Parameters
+    ///
+    /// * `interval` - Duration between scheduled activity polls
+    pub fn schedule_poll_interval(mut self, interval: Duration) -> Self {
+        self.schedule_poll_interval = Some(interval);
+        self
+    }
+
+    /// Sets the Redis connection pool configuration.
+    ///
+    /// # Parameters
+    ///
+    /// * `config` - Redis connection pool configuration
+    pub fn redis_config(mut self, config: RedisConfig) -> Self {
+        self.redis_config = Some(config);
+        self
+    }
+
+    /// Optionally configure a custom metrics sink for monitoring.
+    ///
+    /// This allows you to collect metrics about activity processing, including
+    /// completion rates, retry counts, and execution times.
+    ///
+    /// # Parameters
+    ///
+    /// * `sink` - Custom metrics implementation for collecting statistics
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use runner_q::{WorkerEngine, WorkerConfig, MetricsSink};
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    ///
+    /// // Custom metrics implementation
+    /// struct PrometheusMetrics;
+    ///
+    /// impl MetricsSink for PrometheusMetrics {
+    ///     fn inc_counter(&self, name: &str, value: u64) {
+    ///         // Send to Prometheus
+    ///         println!("Counter {}: {}", name, value);
+    ///     }
+    ///
+    ///     fn observe_duration(&self, name: &str, duration: Duration) {
+    ///         // Record duration metrics
+    ///         println!("Duration {}: {:?}", name, duration);
+    ///     }
+    /// }
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Create worker engine with custom metrics
+    /// let mut engine = WorkerEngine::new(redis_pool, config)
+    ///     .with_metrics(Arc::new(PrometheusMetrics));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_metrics(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = Some(sink);
+        self
+    }
+
+    /// Builds the WorkerEngine with the configured settings.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result<WorkerEngine, WorkerError>` containing the configured engine
+    /// or an error if Redis connection fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WorkerError` if Redis connection cannot be established.
+    pub async fn build(self) -> Result<WorkerEngine, WorkerError> {
+        let redis_url = self.redis_url.unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        let queue_name = self.queue_name.unwrap_or_else(|| "default".to_string());
+        let max_concurrent_activities = self.max_workers.unwrap_or(10);
+        let schedule_poll_interval_seconds = self.schedule_poll_interval.map_or(1, |d| d.as_secs());
+        let metrics = self.metrics.unwrap_or(Arc::new(NoopMetrics));
+
+        let config = WorkerConfig {
+            queue_name,
+            max_concurrent_activities,
+            redis_url: redis_url.clone(),
+            schedule_poll_interval_seconds: Some(schedule_poll_interval_seconds),
+        };
+
+        let redis_pool = if let Some(redis_config) = self.redis_config {
+            create_redis_pool_with_config(&config.redis_url, redis_config).await
+                .map_err(|e| WorkerError::RedisError(e.to_string()))?
+        } else {
+            create_redis_pool(&config.redis_url).await
+                .map_err(|e| WorkerError::RedisError(e.to_string()))?
+        };
+
+        let mut worker_engine = WorkerEngine::new(redis_pool, config);
+        worker_engine.with_metrics(metrics);
+        Ok(worker_engine)
+    }
+}
+
+impl Default for WorkerEngineBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Builder for creating and executing activities with fluent configuration.
+///
+/// This builder provides a more ergonomic API for activity execution with method chaining
+/// instead of constructing an ActivityOption struct directly.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use runner_q::{WorkerEngine, ActivityPriority};
+/// use serde_json::json;
+/// use std::time::Duration;
+///
+/// # async fn example(engine: &WorkerEngine) -> Result<(), Box<dyn std::error::Error>> {
+/// let future = engine
+///     .activity("send_email")
+///     .payload(json!({"to": "user@example.com", "subject": "Hello"}))
+///     .priority(ActivityPriority::High)
+///     .max_retries(5)
+///     .timeout(Duration::from_secs(600))
+///     .execute()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct ActivityBuilder<'a> {
+    engine: &'a WorkerEngineWrapper,
+    activity_type: String,
+    payload: Option<serde_json::Value>,
+    priority: Option<ActivityPriority>,
+    max_retries: Option<u32>,
+    timeout: Option<Duration>,
+    delay: Option<Duration>,
+}
+
+impl<'a> ActivityBuilder<'a> {
+    /// Creates a new ActivityBuilder for the given engine and activity type.
+    pub fn new(engine: &'a WorkerEngineWrapper, activity_type: String) -> Self {
+        Self {
+            engine,
+            activity_type,
+            payload: None,
+            priority: None,
+            max_retries: None,
+            timeout: None,
+            delay: None,
+        }
+    }
+
+    /// Sets the payload for the activity.
+    ///
+    /// # Parameters
+    ///
+    /// * `payload` - JSON payload containing the activity data
+    pub fn payload(mut self, payload: serde_json::Value) -> Self {
+        self.payload = Some(payload);
+        self
+    }
+
+    /// Sets the priority for the activity.
+    ///
+    /// # Parameters
+    ///
+    /// * `priority` - Activity priority level
+    pub fn priority(mut self, priority: ActivityPriority) -> Self {
+        self.priority = Some(priority);
+        self
+    }
+
+    /// Sets the maximum number of retries for the activity.
+    ///
+    /// # Parameters
+    ///
+    /// * `retries` - Maximum number of retry attempts (0 for unlimited)
+    pub fn max_retries(mut self, retries: u32) -> Self {
+        self.max_retries = Some(retries);
+        self
+    }
+
+    /// Sets the timeout for the activity execution.
+    ///
+    /// # Parameters
+    ///
+    /// * `timeout` - Maximum execution time before timeout
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Sets the delay before the activity should be executed.
+    ///
+    /// # Parameters
+    ///
+    /// * `delay` - Delay before execution
+    pub fn delay(mut self, delay: Duration) -> Self {
+        self.delay = Some(delay);
+        self
+    }
+
+    /// Executes the activity with the configured settings.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result<ActivityFuture, WorkerError>` containing the activity future
+    /// or an error if the activity cannot be enqueued.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WorkerError` if the activity cannot be enqueued or if there are Redis connection issues.
+    pub async fn execute(self) -> Result<ActivityFuture, WorkerError> {
+        let payload = self.payload.ok_or_else(|| {
+            WorkerError::QueueError("Activity payload is required".to_string())
+        })?;
+
+        let option = if self.priority.is_some() || self.max_retries.is_some() || self.timeout.is_some() || self.delay.is_some() {
+            Some(ActivityOption {
+                priority: self.priority,
+                max_retries: self.max_retries.unwrap_or(3),
+                timeout_seconds: self.timeout.map(|d| d.as_secs()).unwrap_or(300),
+                delay_seconds: self.delay.map(|d| d.as_secs()),
+            })
+        } else {
+            None
+        };
+
+        self.engine.execute_activity(self.activity_type, payload, option).await
+    }
+}
+
+/// Trait for executing activities, enabling activity orchestration.
+///
+/// This trait allows activity handlers to execute other activities, creating
+/// complex workflows and orchestration patterns. It's provided to handlers
+/// through the `ActivityContext` to enable nested activity execution.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use runner_q::{ActivityExecutor, ActivityOption, ActivityPriority};
+/// use serde_json::json;
+/// use std::sync::Arc;
+///
+/// # async fn example(executor: Arc<dyn ActivityExecutor>) -> Result<(), Box<dyn std::error::Error>> {
+/// // Execute a simple activity
+/// let future = executor.execute_activity(
+///     "send_notification".to_string(),
+///     json!({"user_id": 123, "message": "Hello"}),
+///     None
+/// ).await?;
+///
+/// // Execute a high-priority activity with custom options
+/// let priority_future = executor.execute_activity(
+///     "process_payment".to_string(),
+///     json!({"amount": 100.0}),
+///     Some(ActivityOption {
+///         priority: Some(ActivityPriority::High),
+///         max_retries: 5,
+///         timeout_seconds: 600,
+///         delay_seconds: None,
+///     })
+/// ).await?;
+///
+/// // Wait for completion
+/// if let Ok(Some(result)) = future.get_result().await {
+///     println!("Activity completed: {:?}", result);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[async_trait::async_trait]
+pub trait ActivityExecutor: Send + Sync {
+    /// Creates a fluent activity builder for executing activities with method chaining.
+    ///
+    /// This provides a more ergonomic API for activity execution with fluent configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use runner_q::{WorkerEngine, ActivityPriority};
+    /// use serde_json::json;
+    /// use std::time::Duration;
+    ///
+    /// # async fn example(engine: &WorkerEngine) -> Result<(), Box<dyn std::error::Error>> {
+    /// let future = engine
+    ///     .activity("send_email")
+    ///     .payload(json!({"to": "user@example.com", "subject": "Hello"}))
+    ///     .priority(ActivityPriority::High)
+    ///     .max_retries(5)
+    ///     .timeout(Duration::from_secs(600))
+    ///     .execute()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn activity(&self, activity_type: &str) -> ActivityBuilder<'_>;
+}
+
+/// Wrapper that provides activity execution capabilities to handlers.
+///
+/// This struct implements `ActivityExecutor` and is used internally to provide
+/// activity execution capabilities to activity handlers through the `ActivityContext`.
+/// It wraps the underlying activity queue to enable orchestration.
 #[derive(Clone)]
 pub struct WorkerEngineWrapper {
     activity_queue: Arc<dyn ActivityQueueTrait>,
 }
 
-#[async_trait::async_trait]
-impl ActivityExecutor for WorkerEngineWrapper {
+
+impl WorkerEngineWrapper {
+    pub(crate) fn new(activity_queue: Arc<dyn ActivityQueueTrait>) -> Self {
+        Self { activity_queue }
+    }
+    /// Execute an activity and return a future for tracking its completion.
+    ///
+    /// This method enqueues an activity for processing and returns an `ActivityFuture`
+    /// that can be used to wait for the activity's completion and retrieve its result.
+    ///
+    /// # Parameters
+    ///
+    /// * `activity_type` - String identifier for the activity type
+    /// * `payload` - JSON payload containing the activity data
+    /// * `option` - Optional configuration for the activity
+    ///
+    /// # Returns
+    ///
+    /// Returns an `ActivityFuture` that can be awaited to get the activity result.
     async fn execute_activity(
         &self,
         activity_type: String,
@@ -572,5 +1259,35 @@ impl ActivityExecutor for WorkerEngineWrapper {
             self.activity_queue.clone(),
             activity_id,
         ))
+    }
+}
+
+#[async_trait::async_trait]
+impl ActivityExecutor for WorkerEngineWrapper {
+    /// Creates a fluent activity builder for executing activities with method chaining.
+    ///
+    /// This provides a more ergonomic API for activity execution with fluent configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use runner_q::{WorkerEngine, ActivityPriority};
+    /// use serde_json::json;
+    /// use std::time::Duration;
+    ///
+    /// # async fn example(engine: &WorkerEngine) -> Result<(), Box<dyn std::error::Error>> {
+    /// let future = engine
+    ///     .activity("send_email")
+    ///     .payload(json!({"to": "user@example.com", "subject": "Hello"}))
+    ///     .priority(ActivityPriority::High)
+    ///     .max_retries(5)
+    ///     .timeout(Duration::from_secs(600))
+    ///     .execute()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn activity(&self, activity_type: &str) -> ActivityBuilder<'_> {
+        ActivityBuilder::new(self, activity_type.to_string())
     }
 }

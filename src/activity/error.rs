@@ -1,7 +1,49 @@
-/// Error type for activity operations
+/// Error type for activity operations that supports retry semantics.
+///
+/// This enum distinguishes between errors that should trigger a retry
+/// and those that indicate permanent failure.
+///
+/// # Examples
+///
+/// ```rust
+/// use runner_q::ActivityError;
+/// use runner_q::ActivityHandlerResult;
+///
+/// // Retryable error - temporary network issue
+/// let retry_error = ActivityError::Retry("Network timeout".to_string());
+///
+/// // Non-retryable error - invalid input data
+/// let permanent_error = ActivityError::NonRetry("Invalid user ID format".to_string());
+///
+/// // Using in activity handlers
+/// fn process_user_data(payload: serde_json::Value) -> ActivityHandlerResult {
+///     let user_id = payload["user_id"].as_str()
+///         .ok_or_else(|| ActivityError::NonRetry("Missing user_id".to_string()))?;
+///     
+///     if user_id.is_empty() {
+///         return Err(ActivityError::NonRetry("Empty user_id".to_string()));
+///     }
+///     
+///     // Simulate processing that might fail temporarily
+///     if payload["retry_processing"].as_bool().unwrap_or(false) {
+///         Err(ActivityError::Retry("Processing failed, will retry".to_string()))
+///     } else {
+///         Ok(Some(serde_json::json!({"processed": true})))
+///     }
+/// }
+/// ```
 #[derive(Debug)]
 pub enum ActivityError {
+    /// Error that should trigger a retry attempt.
+    ///
+    /// Use this for temporary failures like network timeouts, temporary service
+    /// unavailability, or other transient issues that might resolve on retry.
     Retry(String),
+    
+    /// Error that should not trigger a retry.
+    ///
+    /// Use this for permanent failures like invalid input data, authentication
+    /// errors, or other issues that won't be resolved by retrying.
     NonRetry(String),
 }
 
@@ -36,8 +78,54 @@ impl From<std::io::Error> for ActivityError {
     }
 }
 
-/// Trait to determine if an error should be retried
+/// Trait to determine if an error should be retried.
+///
+/// This trait allows custom error types to specify their retry behavior,
+/// enabling automatic conversion to `ActivityError` with appropriate retry semantics.
+///
+/// # Examples
+///
+/// ```rust
+/// use runner_q::RetryableError;
+/// use runner_q::ActivityError;
+///
+/// // Custom error type
+/// #[derive(Debug)]
+/// pub struct DatabaseError {
+///     message: String,
+///     is_connection_error: bool,
+/// }
+///
+/// impl RetryableError for DatabaseError {
+///     fn is_retryable(&self) -> bool {
+///         self.is_connection_error
+///     }
+/// }
+///
+/// impl From<DatabaseError> for ActivityError {
+///     fn from(err: DatabaseError) -> Self {
+///         if err.is_retryable() {
+///             ActivityError::Retry(err.message)
+///         } else {
+///             ActivityError::NonRetry(err.message)
+///         }
+///     }
+/// }
+///
+/// // Usage in activity handler
+/// fn handle_database_operation() -> Result<(), DatabaseError> {
+///     // ... database operation that might fail
+///     Err(DatabaseError {
+///         message: "Connection timeout".to_string(),
+///         is_connection_error: true,
+///     })
+/// }
+/// ```
 pub trait RetryableError {
+    /// Determine if this error should trigger a retry attempt.
+    ///
+    /// Return `true` for temporary errors that might resolve on retry,
+    /// `false` for permanent errors that won't be fixed by retrying.
     fn is_retryable(&self) -> bool;
 }
 

@@ -16,13 +16,11 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use runner_q::{ActivityQueue, WorkerEngine, ActivityPriority, ActivityOption};
-//! use runner_q::{ActivityHandler, ActivityContext, ActivityHandlerResult, ActivityError};
-//! use runner_q::config::WorkerConfig;
+//! use runner_q::{WorkerEngine, ActivityPriority, ActivityHandler, ActivityContext, ActivityHandlerResult, ActivityError};
 //! use std::sync::Arc;
 //! use async_trait::async_trait;
-//! use serde::{Serialize, Deserialize};
-//! use serde_json::Value;
+//! use serde_json::json;
+//! use std::time::Duration;
 //!
 //! // Define activity types
 //! #[derive(Debug, Clone)]
@@ -79,50 +77,46 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Create Redis connection pool
-//!     let redis_pool = bb8_redis::bb8::Pool::builder()
-//!         .build(bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:6379")?)
+//!     // Improved API: Builder pattern for WorkerEngine
+//!     let engine = WorkerEngine::builder()
+//!         .redis_url("redis://localhost:6379")
+//!         .queue_name("my_app")
+//!         .max_workers(8)
+//!         .schedule_poll_interval(Duration::from_secs(30))
+//!         .build()
 //!         .await?;
-//!
-//!     // Create worker engine
-//!     let config = WorkerConfig::default();
-//!     let mut worker_engine = WorkerEngine::new(redis_pool, config);
 //!
 //!     // Register activity handler
 //!     let send_email_activity = SendEmailActivity;
-//!     worker_engine.register_activity(MyActivityType::SendEmail.to_string(), Arc::new(send_email_activity));
+//!     engine.register_activity(MyActivityType::SendEmail.to_string(), Arc::new(send_email_activity));
 //!
-//!     // Execute an activity with custom options
-//!     let future = worker_engine.execute_activity(
-//!         MyActivityType::SendEmail.to_string(),
-//!         serde_json::json!({"to": "user@example.com", "subject": "Welcome!"}),
-//!         Some(ActivityOption {
-//!             priority: Some(ActivityPriority::High),
-//!             max_retries: 5,
-//!             timeout_seconds: 600, // 10 minutes
-//!             delay_seconds: None, // Execute immediately
-//!         })
-//!     ).await?;
+//!     // Improved API: Fluent activity execution
+//!     let future = engine
+//!         .activity("send_email")
+//!         .payload(json!({"to": "user@example.com", "subject": "Welcome!"}))
+//!         .priority(ActivityPriority::High)
+//!         .max_retries(5)
+//!         .timeout(Duration::from_secs(600))
+//!         .execute()
+//!         .await?;
 //!
 //!     // Schedule an activity for future execution (10 seconds from now)
-//!     let delay_seconds = 10;
-//!     let scheduled_future = worker_engine.execute_activity(
-//!         MyActivityType::SendEmail.to_string(),
-//!         serde_json::json!({"to": "user@example.com", "subject": "Reminder"}),
-//!         Some(ActivityOption {
-//!             priority: Some(ActivityPriority::Normal),
-//!             max_retries: 3,
-//!             timeout_seconds: 300,
-//!             delay_seconds: Some(delay_seconds as u64),
-//!         })
-//!     ).await?;
+//!     let scheduled_future = engine
+//!         .activity("send_email")
+//!         .payload(json!({"to": "user@example.com", "subject": "Reminder"}))
+//!         .priority(ActivityPriority::Normal)
+//!         .max_retries(3)
+//!         .timeout(Duration::from_secs(300))
+//!         .delay(Duration::from_secs(10))
+//!         .execute()
+//!         .await?;
 //!
 //!     // Execute an activity with default options
-//!     let future2 = worker_engine.execute_activity(
-//!         MyActivityType::SendEmail.to_string(),
-//!         serde_json::json!({"to": "admin@example.com"}),
-//!         None // Uses default priority (Normal), 3 retries, 300s timeout, immediate execution
-//!     ).await?;
+//!     let future2 = engine
+//!         .activity("send_email")
+//!         .payload(json!({"to": "admin@example.com"}))
+//!         .execute()
+//!         .await?;
 //!
 //!     // Spawn a task to handle the result
 //!     tokio::spawn(async move {
@@ -138,7 +132,7 @@
 //!     });
 //!
 //!     // Start the worker engine (this will run indefinitely)
-//!     worker_engine.start().await?;
+//!     engine.start().await?;
 //!
 //!     Ok(())
 //! }
@@ -151,42 +145,38 @@
 //! scheduled time arrives.
 //!
 //! ```rust,no_run
-//! use runner_q::{WorkerEngine, ActivityOption, ActivityPriority};
-//! use chrono::{Utc, Duration};
+//! use runner_q::{WorkerEngine, ActivityPriority};
+//! use std::time::Duration;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! # let worker_engine: WorkerEngine = todo!();
+//! # let engine: WorkerEngine = todo!();
 //! // Schedule an activity for 30 minutes from now
-//! let scheduled_time = (Utc::now() + Duration::minutes(30)).timestamp() as u64;
-//!
-//! let future = worker_engine.execute_activity(
-//!     "send_reminder".to_string(),
-//!     serde_json::json!({"user_id": 123, "message": "Don't forget your appointment!"}),
-//!     Some(ActivityOption {
-//!         priority: Some(ActivityPriority::Normal),
-//!         max_retries: 3,
-//!         timeout_seconds: 300,
-//!         delay_seconds: Some(scheduled_time),
-//!     })
-//! ).await?;
+//! let future = engine
+//!     .activity("send_reminder")
+//!     .payload(serde_json::json!({"user_id": 123, "message": "Don't forget your appointment!"}))
+//!     .priority(ActivityPriority::Normal)
+//!     .max_retries(3)
+//!     .timeout(Duration::from_secs(300))
+//!     .delay(Duration::from_secs(30 * 60)) // 30 minutes
+//!     .execute()
+//!     .await?;
 //!
 //! // Schedule a recurring task (daily report at 9 AM)
-//! let tomorrow_9am = Utc::now()
+//! let tomorrow_9am = chrono::Utc::now()
 //!     .date_naive()
 //!     .and_hms_opt(9, 0, 0).unwrap()
 //!     .and_utc()
-//!     + Duration::days(1);
+//!     + chrono::Duration::days(1);
 //!
-//! worker_engine.execute_activity(
-//!     "generate_daily_report".to_string(),
-//!     serde_json::json!({"report_type": "daily", "date": tomorrow_9am.format("%Y-%m-%d").to_string()}),
-//!     Some(ActivityOption {
-//!         priority: Some(ActivityPriority::High),
-//!         max_retries: 5,
-//!         timeout_seconds: 1800, // 30 minutes
-//!         delay_seconds: Some(tomorrow_9am.timestamp() as u64),
-//!     })
-//! ).await?;
+//! engine
+//!     .activity("generate_daily_report")
+//!     .payload(serde_json::json!({"report_type": "daily", "date": tomorrow_9am.format("%Y-%m-%d").to_string()}))
+//!     .priority(ActivityPriority::High)
+//!     .max_retries(5)
+//!     .timeout(Duration::from_secs(1800)) // 30 minutes
+//!     .delay(Duration::from_secs(tomorrow_9am.timestamp() as u64))
+//!     .execute()
+//!     .await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -210,36 +200,32 @@
 //!             .ok_or_else(|| ActivityError::NonRetry("Missing order_id".to_string()))?;
 //!         
 //!         // Step 1: Validate payment
-//!         let _payment_future = context.worker_engine.execute_activity(
-//!             "validate_payment".to_string(),
-//!             serde_json::json!({"order_id": order_id}),
-//!             Some(ActivityOption {
-//!                 priority: Some(ActivityPriority::High),
-//!                 max_retries: 3,
-//!                 timeout_seconds: 120,
-//!                 delay_seconds: None,
-//!             })
-//!         ).await.map_err(|e| ActivityError::Retry(format!("Failed to enqueue payment validation: {}", e)))?;
+//!         let _payment_future = context.activity_executor
+//!             .activity("validate_payment")
+//!             .payload(serde_json::json!({"order_id": order_id}))
+//!             .priority(ActivityPriority::High)
+//!             .max_retries(3)
+//!             .timeout(std::time::Duration::from_secs(120))
+//!             .execute()
+//!             .await.map_err(|e| ActivityError::Retry(format!("Failed to enqueue payment validation: {}", e)))?;
 //!         
 //!         // Step 2: Update inventory
-//!         let _inventory_future = context.worker_engine.execute_activity(
-//!             "update_inventory".to_string(),
-//!             serde_json::json!({"order_id": order_id}),
-//!             None
-//!         ).await.map_err(|e| ActivityError::Retry(format!("Failed to enqueue inventory update: {}", e)))?;
+//!         let _inventory_future = context.activity_executor
+//!             .activity("update_inventory")
+//!             .payload(serde_json::json!({"order_id": order_id}))
+//!             .execute()
+//!             .await.map_err(|e| ActivityError::Retry(format!("Failed to enqueue inventory update: {}", e)))?;
 //!         
 //!         // Step 3: Schedule delivery notification for later
-//!         let notification_time = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as u64;
-//!         context.worker_engine.execute_activity(
-//!             "send_delivery_notification".to_string(),
-//!             serde_json::json!({"order_id": order_id, "customer_email": payload["customer_email"]}),
-//!             Some(ActivityOption {
-//!                 priority: Some(ActivityPriority::Normal),
-//!                 max_retries: 5,
-//!                 timeout_seconds: 300,
-//!                 delay_seconds: Some(notification_time),
-//!             })
-//!         ).await.map_err(|e| ActivityError::Retry(format!("Failed to schedule notification: {}", e)))?;
+//!         context.activity_executor
+//!             .activity("send_delivery_notification")
+//!             .payload(serde_json::json!({"order_id": order_id, "customer_email": payload["customer_email"]}))
+//!             .priority(ActivityPriority::Normal)
+//!             .max_retries(5)
+//!             .timeout(std::time::Duration::from_secs(300))
+//!             .delay(std::time::Duration::from_secs(3600)) // 1 hour
+//!             .execute()
+//!             .await.map_err(|e| ActivityError::Retry(format!("Failed to schedule notification: {}", e)))?;
 //!         
 //!         Ok(Some(serde_json::json!({
 //!             "order_id": order_id,
@@ -264,9 +250,9 @@ pub mod worker;
 pub use crate::config::WorkerConfig;
 pub use crate::queue::queue::{ActivityQueue, QueueStats};
 pub use crate::runner::error::WorkerError;
-pub use crate::runner::runner::{ActivityExecutor, WorkerEngine};
+pub use crate::runner::redis::RedisConfig;
+pub use crate::runner::runner::{ActivityExecutor, WorkerEngine, WorkerEngineBuilder, ActivityBuilder};
 pub use activity::activity::{
-    ActivityContext, ActivityFuture, ActivityHandler, ActivityHandlerResult, ActivityOption,
-    ActivityPriority, ActivityStatus,
+    ActivityContext, ActivityFuture, ActivityHandler, ActivityHandlerResult, ActivityPriority,
 };
 pub use activity::error::{ActivityError, RetryableError};

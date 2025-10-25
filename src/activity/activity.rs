@@ -11,36 +11,120 @@ use uuid::Uuid;
 // Import error handling types
 use super::error::ActivityError;
 
-/// Activity priority levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+/// Activity priority levels that determine the order of execution.
+///
+/// Activities with higher priority are processed before those with lower priority.
+/// Within the same priority level, activities are processed in FIFO (first-in, first-out) order.
+///
+/// # Priority Ordering
+///
+/// 1. **Critical** - Highest priority, processed first
+/// 2. **High** - High priority activities
+/// 3. **Normal** - Default priority for most activities
+/// 4. **Low** - Lowest priority, processed last
+///
+/// # Examples
+///
+/// ```rust
+/// use runner_q::ActivityPriority;
+/// use runner_q::ActivityOption;
+///
+/// // Create a high-priority activity
+/// let options = ActivityOption {
+///     priority: Some(ActivityPriority::High),
+///     max_retries: 3,
+///     timeout_seconds: 300,
+///     delay_seconds: None,
+/// };
+///
+/// // Critical priority for urgent tasks
+/// let critical_options = ActivityOption {
+///     priority: Some(ActivityPriority::Critical),
+///     max_retries: 5,
+///     timeout_seconds: 600,
+///     delay_seconds: None,
+/// };
+/// ```
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ActivityPriority {
+    /// Low priority - processed after all higher priority activities
     Low = 1,
+    /// Normal priority - default priority for most activities
+    #[default]
     Normal = 2,
+    /// High priority - processed before Normal and Low priority activities
     High = 3,
+    /// Critical priority - highest priority, processed first
     Critical = 4,
 }
 
-impl Default for ActivityPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
-/// Activity status tracking
+/// Activity status tracking throughout the activity lifecycle.
+///
+/// Activities progress through these states as they are processed by the worker engine.
+/// The status is used for monitoring, debugging, and understanding the current state of activities.
+///
+/// # Lifecycle Flow
+///
+/// ```
+/// Pending → Running → Completed
+///    ↓         ↓
+/// Retrying → Failed → DeadLetter
+/// ```
+///
+/// # Examples
+///
+/// ```rust
+/// use runner_q::ActivityStatus;
+///
+/// // Check if an activity is in a terminal state
+/// fn is_terminal_status(status: &ActivityStatus) -> bool {
+///     matches!(status, ActivityStatus::Completed | ActivityStatus::Failed | ActivityStatus::DeadLetter)
+/// }
+///
+/// // Check if an activity is currently being processed
+/// fn is_active_status(status: &ActivityStatus) -> bool {
+///     matches!(status, ActivityStatus::Pending | ActivityStatus::Running | ActivityStatus::Retrying)
+/// }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ActivityStatus {
+pub(crate) enum ActivityStatus {
+    /// Activity is queued and waiting to be processed
     Pending,
+    /// Activity is currently being executed by a worker
     Running,
+    /// Activity completed successfully
     Completed,
+    /// Activity failed and will not be retried
     Failed,
+    /// Activity failed but is scheduled for retry
     Retrying,
+    /// Activity exceeded maximum retry attempts and moved to dead letter queue
     DeadLetter,
 }
 
-pub struct ActivityOption {
+pub(crate) struct ActivityOption {
+    /// Priority level for the activity.
+    ///
+    /// When `None`, uses the default priority (Normal).
+    /// Higher priority activities are processed before lower priority ones.
     pub priority: Option<ActivityPriority>,
+    
+    /// Maximum number of retry attempts for failed activities.
+    ///
+    /// Set to `0` for unlimited retries (use with caution).
+    /// When retries are exhausted, the activity is moved to the dead letter queue.
     pub max_retries: u32,
+    
+    /// Maximum execution time in seconds before the activity times out.
+    ///
+    /// Timed out activities are automatically retried unless max_retries is exceeded.
     pub timeout_seconds: u64,
+    
+    /// Delay in seconds before the activity should be executed.
+    ///
+    /// When `None`, the activity is executed immediately.
+    /// When `Some(seconds)`, the activity is scheduled for future execution.
     pub delay_seconds: Option<u64>,
 }
 
@@ -62,7 +146,7 @@ pub(crate) struct Activity {
 }
 
 impl Activity {
-    pub fn new(
+    pub(crate) fn new(
         activity_type: String,
         payload: serde_json::Value,
         option: Option<ActivityOption>,
@@ -97,29 +181,146 @@ impl Activity {
     }
 }
 
-/// Context provided to Activity handlers during execution
+/// Context provided to Activity handlers during execution.
+///
+/// This struct contains all the information and utilities available to activity handlers
+/// during their execution, including metadata, retry information, and the ability to execute
+/// other activities for orchestration.
+///
+/// # Examples
+///
+/// ```rust
+/// use runner_q::{ActivityContext, ActivityHandler, ActivityHandlerResult, ActivityOption, ActivityPriority};
+/// use async_trait::async_trait;
+/// use serde_json::Value;
+///
+/// pub struct OrderProcessingHandler;
+///
+/// #[async_trait]
+/// impl ActivityHandler for OrderProcessingHandler {
+///     async fn handle(&self, payload: Value, context: ActivityContext) -> ActivityHandlerResult {
+///         // Access activity metadata
+///         println!("Processing activity {} of type {}", context.activity_id, context.activity_type);
+///         println!("This is retry attempt #{}", context.retry_count);
+///         
+///         // Execute a follow-up activity
+///         let follow_up_future = context.activity_executor.execute_activity(
+///             "send_confirmation_email".to_string(),
+///             serde_json::json!({"order_id": payload["order_id"]}),
+///             Some(ActivityOption {
+///                 priority: Some(ActivityPriority::Normal),
+///                 max_retries: 3,
+///                 timeout_seconds: 300,
+///                 delay_seconds: None,
+///             })
+///         ).await?;
+///         
+///         // Check for cancellation
+///         if context.cancel_token.is_cancelled() {
+///             return Err(ActivityError::NonRetry("Activity was cancelled".to_string()));
+///         }
+///         
+///         Ok(Some(serde_json::json!({"status": "processed"})))
+///     }
+///     
+///     fn activity_type(&self) -> String {
+///         "process_order".to_string()
+///     }
+/// }
+/// ```
 #[derive(Clone)]
 pub struct ActivityContext {
+    /// Unique identifier for this activity instance
     pub activity_id: Uuid,
+    /// Type of activity being executed
     pub activity_type: String,
+    /// Current retry attempt number (0 for first execution)
     pub retry_count: u32,
+    /// Custom metadata associated with the activity
     pub metadata: HashMap<String, String>,
+    /// Token for checking if the activity has been cancelled
     pub cancel_token: CancellationToken,
-    pub worker_engine: Arc<dyn ActivityExecutor>,
+    /// Reference to the worker engine for executing other activities
+    pub activity_executor: Arc<dyn ActivityExecutor>,
 }
 
 ///A convenient Result type alias for use in activity handlers that want to use ? operator
 pub type ActivityHandlerResult<T = Option<serde_json::Value>> = Result<T, ActivityError>;
 
-/// Trait that all Activity handlers must implement
+/// Trait that all Activity handlers must implement.
+///
+/// This trait defines the interface for processing activities in the worker engine.
+/// Implementations should be stateless and thread-safe, as they may be called
+/// concurrently by multiple worker threads.
+///
+/// # Examples
+///
+/// ```rust
+/// use runner_q::{ActivityHandler, ActivityContext, ActivityHandlerResult, ActivityError};
+/// use async_trait::async_trait;
+/// use serde_json::Value;
+///
+/// pub struct EmailHandler {
+///     smtp_client: SmtpClient, // Your SMTP client
+/// }
+///
+/// #[async_trait]
+/// impl ActivityHandler for EmailHandler {
+///     async fn handle(&self, payload: Value, context: ActivityContext) -> ActivityHandlerResult {
+///         // Extract email data from payload
+///         let to = payload["to"]
+///             .as_str()
+///             .ok_or_else(|| ActivityError::NonRetry("Missing 'to' field".to_string()))?;
+///         
+///         let subject = payload["subject"]
+///             .as_str()
+///             .unwrap_or("No Subject");
+///         
+///         // Send email (your implementation)
+///         match self.smtp_client.send_email(to, subject, &payload["body"]).await {
+///             Ok(message_id) => Ok(Some(serde_json::json!({
+///                 "message_id": message_id,
+///                 "status": "sent"
+///             }))),
+///             Err(e) if e.is_retryable() => Err(ActivityError::Retry(e.to_string())),
+///             Err(e) => Err(ActivityError::NonRetry(e.to_string())),
+///         }
+///     }
+///     
+///     fn activity_type(&self) -> String {
+///         "send_email".to_string()
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait ActivityHandler: Send + Sync {
+    /// Process the activity with the given payload and context.
+    ///
+    /// This method is called by the worker engine to execute the activity.
+    /// It should return:
+    /// - `Ok(Some(value))` - Activity completed successfully with result data
+    /// - `Ok(None)` - Activity completed successfully with no result data
+    /// - `Err(ActivityError::Retry(reason))` - Activity failed but should be retried
+    /// - `Err(ActivityError::NonRetry(reason))` - Activity failed and should not be retried
+    ///
+    /// # Parameters
+    ///
+    /// * `payload` - JSON payload containing the activity data
+    /// * `context` - Execution context with metadata and utilities
+    ///
+    /// # Returns
+    ///
+    /// Returns a result indicating success or failure, with optional retry behavior.
     async fn handle(
         &self,
         payload: serde_json::Value,
         context: ActivityContext,
     ) -> ActivityHandlerResult;
 
+    /// Return the activity type string that this handler processes.
+    ///
+    /// This string is used to match activities with their handlers when they are
+    /// registered with the worker engine. It should be unique and descriptive.
     fn activity_type(&self) -> String;
 }
 
