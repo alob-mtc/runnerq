@@ -235,9 +235,10 @@ impl WorkerEngine {
     /// # Ok(())
     /// # }
     /// 
-    /// // With custom Redis configuration
+    /// // With custom Redis configuration and metrics
     /// # async fn example_with_redis_config() -> Result<(), Box<dyn std::error::Error>> {
-    /// use runner_q::RedisConfig;
+    /// use runner_q::{RedisConfig, MetricsSink};
+    /// use std::sync::Arc;
     /// 
     /// let redis_config = RedisConfig {
     ///     max_size: 100,
@@ -247,11 +248,23 @@ impl WorkerEngine {
     ///     max_lifetime: Duration::from_secs(3600),
     /// };
     /// 
+    /// // Custom metrics implementation
+    /// struct PrometheusMetrics;
+    /// impl MetricsSink for PrometheusMetrics {
+    ///     fn inc_counter(&self, name: &str, value: u64) {
+    ///         println!("Counter {}: {}", name, value);
+    ///     }
+    ///     fn observe_duration(&self, name: &str, duration: Duration) {
+    ///         println!("Duration {}: {:?}", name, duration);
+    ///     }
+    /// }
+    /// 
     /// let engine = WorkerEngine::builder()
     ///     .redis_url("redis://localhost:6379")
     ///     .queue_name("my_app")
     ///     .max_workers(8)
     ///     .redis_config(redis_config)
+    ///     .metrics(Arc::new(PrometheusMetrics))
     ///     .build()
     ///     .await?;
     /// # Ok(())
@@ -931,48 +944,16 @@ impl WorkerEngineBuilder {
         self
     }
 
-    /// Optionally configure a custom metrics sink for monitoring.
-    ///
-    /// This allows you to collect metrics about activity processing, including
-    /// completion rates, retry counts, and execution times.
+    /// Sets the metrics sink for monitoring activity processing.
     ///
     /// # Parameters
     ///
-    /// * `sink` - Custom metrics implementation for collecting statistics
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use runner_q::{WorkerEngine, WorkerConfig, MetricsSink};
-    /// use std::sync::Arc;
-    /// use std::time::Duration;
-    ///
-    /// // Custom metrics implementation
-    /// struct PrometheusMetrics;
-    ///
-    /// impl MetricsSink for PrometheusMetrics {
-    ///     fn inc_counter(&self, name: &str, value: u64) {
-    ///         // Send to Prometheus
-    ///         println!("Counter {}: {}", name, value);
-    ///     }
-    ///
-    ///     fn observe_duration(&self, name: &str, duration: Duration) {
-    ///         // Record duration metrics
-    ///         println!("Duration {}: {:?}", name, duration);
-    ///     }
-    /// }
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// // Create worker engine with custom metrics
-    /// let mut engine = WorkerEngine::new(redis_pool, config)
-    ///     .with_metrics(Arc::new(PrometheusMetrics));
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_metrics(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+    /// * `sink` - Metrics implementation for collecting statistics
+    pub fn metrics(mut self, sink: Arc<dyn MetricsSink>) -> Self {
         self.metrics = Some(sink);
         self
     }
+
 
     /// Builds the WorkerEngine with the configured settings.
     ///
@@ -989,7 +970,6 @@ impl WorkerEngineBuilder {
         let queue_name = self.queue_name.unwrap_or_else(|| "default".to_string());
         let max_concurrent_activities = self.max_workers.unwrap_or(10);
         let schedule_poll_interval_seconds = self.schedule_poll_interval.map_or(1, |d| d.as_secs());
-        let metrics = self.metrics.unwrap_or(Arc::new(NoopMetrics));
 
         let config = WorkerConfig {
             queue_name,
@@ -999,15 +979,18 @@ impl WorkerEngineBuilder {
         };
 
         let redis_pool = if let Some(redis_config) = self.redis_config {
-            create_redis_pool_with_config(&config.redis_url, redis_config).await
-                .map_err(|e| WorkerError::RedisError(e.to_string()))?
+            create_redis_pool_with_config(&config.redis_url, redis_config).await?
         } else {
-            create_redis_pool(&config.redis_url).await
-                .map_err(|e| WorkerError::RedisError(e.to_string()))?
+            create_redis_pool(&config.redis_url).await?
         };
 
         let mut worker_engine = WorkerEngine::new(redis_pool, config);
-        worker_engine.with_metrics(metrics);
+        
+        // Apply custom metrics if provided
+        if let Some(metrics) = self.metrics {
+            worker_engine.with_metrics(metrics);
+        }
+
         Ok(worker_engine)
     }
 }
