@@ -48,9 +48,13 @@ pub async fn create_redis_pool_with_config(
     let manager = RedisConnectionManager::new(redis_url)
         .map_err(|e| WorkerError::RedisError(format!("invalid redis url: {} - {}", redacted(redis_url), e)))?;
 
+    let min_idle = config.min_idle.min(config.max_size);
+    if config.max_size == 0 {
+        return Err(WorkerError::RedisError("max_size must be > 0".into()));
+    }
     let pool = Pool::builder()
         .max_size(config.max_size)
-        .min_idle(Some(config.min_idle))
+        .min_idle(Some(min_idle))
         .connection_timeout(config.conn_timeout)
         .idle_timeout(Some(config.idle_timeout))
         .max_lifetime(Some(config.max_lifetime))
