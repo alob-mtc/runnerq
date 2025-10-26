@@ -684,7 +684,7 @@ impl WorkerEngine {
             let secs = self
                 .config
                 .schedule_poll_interval_seconds
-                .unwrap_or(30)
+                .unwrap_or(5)
                 .max(1);
             Duration::from_secs(secs)
         };
@@ -969,7 +969,7 @@ impl WorkerEngineBuilder {
         let redis_url = self.redis_url.unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
         let queue_name = self.queue_name.unwrap_or_else(|| "default".to_string());
         let max_concurrent_activities = self.max_workers.unwrap_or(10);
-        let schedule_poll_interval_seconds = self.schedule_poll_interval.map_or(1, |d| d.as_secs());
+        let schedule_poll_interval_seconds = self.schedule_poll_interval.map_or(5, |d| d.as_secs());
 
         let config = WorkerConfig {
             queue_name,
