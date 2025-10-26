@@ -20,6 +20,7 @@
 //! use std::sync::Arc;
 //! use async_trait::async_trait;
 //! use serde_json::json;
+//! use serde::{Serialize, Deserialize};
 //! use std::time::Duration;
 //!
 //! // Define activity types
@@ -138,49 +139,6 @@
 //! }
 //! ```
 //!
-//! ## Activity Scheduling
-//!
-//! Runner-Q supports precise scheduling of activities for future execution using Unix timestamps.
-//! Scheduled activities are stored in a Redis sorted set and automatically processed when their
-//! scheduled time arrives.
-//!
-//! ```rust,no_run
-//! use runner_q::{WorkerEngine, ActivityPriority};
-//! use std::time::Duration;
-//!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! # let engine: WorkerEngine = todo!();
-//! // Schedule an activity for 30 minutes from now
-//! let future = engine
-//!     .activity("send_reminder")
-//!     .payload(serde_json::json!({"user_id": 123, "message": "Don't forget your appointment!"}))
-//!     .priority(ActivityPriority::Normal)
-//!     .max_retries(3)
-//!     .timeout(Duration::from_secs(300))
-//!     .delay(Duration::from_secs(30 * 60)) // 30 minutes
-//!     .execute()
-//!     .await?;
-//!
-//! // Schedule a recurring task (daily report at 9 AM)
-//! let tomorrow_9am = chrono::Utc::now()
-//!     .date_naive()
-//!     .and_hms_opt(9, 0, 0).unwrap()
-//!     .and_utc()
-//!     + chrono::Duration::days(1);
-//!
-//! engine
-//!     .activity("generate_daily_report")
-//!     .payload(serde_json::json!({"report_type": "daily", "date": tomorrow_9am.format("%Y-%m-%d").to_string()}))
-//!     .priority(ActivityPriority::High)
-//!     .max_retries(5)
-//!     .timeout(Duration::from_secs(1800)) // 30 minutes
-//!     .delay(Duration::from_secs(tomorrow_9am.timestamp() as u64))
-//!     .execute()
-//!     .await?;
-//! # Ok(())
-//! # }
-//! ```
-//!
 //! ## Activity Orchestration
 //!
 //! Activities can execute other activities using the `ActivityExecutor` available in the
@@ -251,7 +209,7 @@ pub use crate::config::WorkerConfig;
 pub use crate::queue::queue::{ActivityQueue, QueueStats};
 pub use crate::runner::error::WorkerError;
 pub use crate::runner::redis::RedisConfig;
-pub use crate::runner::runner::{ActivityExecutor, WorkerEngine, WorkerEngineBuilder, ActivityBuilder};
+pub use crate::runner::runner::{ActivityExecutor, WorkerEngine, WorkerEngineBuilder, ActivityBuilder, MetricsSink};
 pub use activity::activity::{
     ActivityContext, ActivityFuture, ActivityHandler, ActivityHandlerResult, ActivityPriority,
 };

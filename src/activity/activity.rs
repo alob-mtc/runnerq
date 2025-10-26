@@ -67,9 +67,9 @@ pub enum ActivityPriority {
 /// # Lifecycle Flow
 ///
 /// ```
-/// Pending → Running → Completed
-///    ↓         ↓
-/// Retrying → Failed → DeadLetter
+/// Pending -> Running -> Completed
+///    |         |
+/// Retrying -> Failed -> DeadLetter
 /// ```
 ///
 /// # Examples
@@ -88,7 +88,7 @@ pub enum ActivityPriority {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub(crate) enum ActivityStatus {
+pub enum ActivityStatus {
     /// Activity is queued and waiting to be processed
     Pending,
     /// Activity is currently being executed by a worker
@@ -103,7 +103,7 @@ pub(crate) enum ActivityStatus {
     DeadLetter,
 }
 
-pub(crate) struct ActivityOption {
+pub struct ActivityOption {
     /// Priority level for the activity.
     ///
     /// When `None`, uses the default priority (Normal).
@@ -342,7 +342,7 @@ impl ActivityFuture {
     /// ```
     /// # use std::sync::Arc;
     /// # use uuid::Uuid;
-    /// # use crate::ActivityFuture;
+    /// # use runner_q::ActivityFuture;
     /// # let queue = Arc::new(/* an implementation of ActivityQueueTrait */);
     /// let activity_id = Uuid::new_v4();
     /// let fut = ActivityFuture::new(queue, activity_id);
