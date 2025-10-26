@@ -30,20 +30,16 @@ use tokio_util::sync::CancellationToken;
 ///
 /// // Prometheus metrics implementation
 /// struct PrometheusMetrics {
-///     registry: prometheus::Registry,
+///     // Contains pre-registered Prometheus metrics
 /// }
 ///
 /// impl MetricsSink for PrometheusMetrics {
 ///     fn inc_counter(&self, name: &str, value: u64) {
-///         // Increment Prometheus counter
-///         let counter = prometheus::Counter::new(name, "Activity processing counter").unwrap();
-///         counter.inc_by(value as f64);
+///         // Increment the appropriate counter based on name
 ///     }
 ///     
 ///     fn observe_duration(&self, name: &str, duration: Duration) {
-///         // Record duration histogram
-///         let histogram = prometheus::Histogram::new(name, "Activity execution duration").unwrap();
-///         histogram.observe(duration.as_secs_f64());
+///         // Record the duration in the appropriate histogram
 ///     }
 /// }
 ///
