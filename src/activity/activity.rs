@@ -88,7 +88,7 @@ pub enum ActivityPriority {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ActivityStatus {
+pub(crate) enum ActivityStatus {
     /// Activity is queued and waiting to be processed
     Pending,
     /// Activity is currently being executed by a worker
@@ -103,7 +103,7 @@ pub enum ActivityStatus {
     DeadLetter,
 }
 
-pub struct ActivityOption {
+pub(crate) struct ActivityOption {
     /// Priority level for the activity.
     ///
     /// When `None`, uses the default priority (Normal).

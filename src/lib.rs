@@ -91,21 +91,22 @@
 //!     let send_email_activity = SendEmailActivity;
 //!     engine.register_activity(MyActivityType::SendEmail.to_string(), Arc::new(send_email_activity));
 //!
+//!     // Get activity executor for fluent activity execution
+//!     let activity_executor = engine.get_activity_executor();
+//!
 //!     // Improved API: Fluent activity execution
-//!     let future = engine
+//!     let future = activity_executor
 //!         .activity("send_email")
 //!         .payload(json!({"to": "user@example.com", "subject": "Welcome!"}))
-//!         .priority(ActivityPriority::High)
 //!         .max_retries(5)
 //!         .timeout(Duration::from_secs(600))
 //!         .execute()
 //!         .await?;
 //!
 //!     // Schedule an activity for future execution (10 seconds from now)
-//!     let scheduled_future = engine
+//!     let scheduled_future = activity_executor
 //!         .activity("send_email")
 //!         .payload(json!({"to": "user@example.com", "subject": "Reminder"}))
-//!         .priority(ActivityPriority::Normal)
 //!         .max_retries(3)
 //!         .timeout(Duration::from_secs(300))
 //!         .delay(Duration::from_secs(10))
@@ -113,7 +114,7 @@
 //!         .await?;
 //!
 //!     // Execute an activity with default options
-//!     let future2 = engine
+//!     let future2 = activity_executor
 //!         .activity("send_email")
 //!         .payload(json!({"to": "admin@example.com"}))
 //!         .execute()
@@ -178,7 +179,6 @@
 //!         context.activity_executor
 //!             .activity("send_delivery_notification")
 //!             .payload(serde_json::json!({"order_id": order_id, "customer_email": payload["customer_email"]}))
-//!             .priority(ActivityPriority::Normal)
 //!             .max_retries(5)
 //!             .timeout(std::time::Duration::from_secs(300))
 //!             .delay(std::time::Duration::from_secs(3600)) // 1 hour
