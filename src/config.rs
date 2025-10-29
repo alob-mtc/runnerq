@@ -40,7 +40,7 @@ pub struct WorkerConfig {
     /// };
     /// ```
     pub queue_name: String,
-    
+
     /// Maximum number of activities that can be processed concurrently.
     ///
     /// This controls the worker pool size and prevents resource exhaustion.
@@ -66,7 +66,7 @@ pub struct WorkerConfig {
     /// };
     /// ```
     pub max_concurrent_activities: usize,
-    
+
     /// Redis connection URL for the activity queue.
     ///
     /// Supports standard Redis URL format including authentication and database selection.
@@ -98,7 +98,7 @@ pub struct WorkerConfig {
     /// };
     /// ```
     pub redis_url: String,
-    
+
     /// Interval in seconds for polling scheduled activities.
     ///
     /// When `None`, uses a default interval of 30 seconds.
@@ -124,6 +124,18 @@ pub struct WorkerConfig {
     /// };
     /// ```
     pub schedule_poll_interval_seconds: Option<u64>,
+
+    /// Lease duration in milliseconds for claimed activities before considered expired
+    /// Defaults to 60000 ms (60s)
+    pub lease_ms: Option<u64>,
+
+    /// Interval in seconds for the reaper to scan processing leases
+    /// Defaults to 5 seconds
+    pub reaper_interval_seconds: Option<u64>,
+
+    /// Maximum number of expired items to requeue per reaper tick
+    /// Defaults to 100
+    pub reaper_batch_size: Option<usize>,
 }
 
 impl Default for WorkerConfig {
@@ -133,6 +145,9 @@ impl Default for WorkerConfig {
             max_concurrent_activities: 10,
             redis_url: "redis://127.0.0.1:6379".to_string(),
             schedule_poll_interval_seconds: None,
+            lease_ms: Some(60_000),
+            reaper_interval_seconds: Some(5),
+            reaper_batch_size: Some(100),
         }
     }
 }

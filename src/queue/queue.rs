@@ -1,5 +1,8 @@
 use crate::worker::WorkerError;
-use crate::{activity::activity::{Activity,ActivityStatus}, ActivityPriority};
+use crate::{
+    activity::activity::{Activity, ActivityStatus},
+    ActivityPriority,
+};
 use async_trait::async_trait;
 use bb8_redis::{bb8::Pool, RedisConnectionManager};
 use redis::AsyncCommands;
@@ -32,6 +35,16 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
 
     /// Process scheduled activities that are ready to run
     async fn process_scheduled_activities(&self) -> Result<Vec<Activity>, WorkerError>;
+
+    /// Requeue expired processing items back to main queue (reaper)
+    async fn requeue_expired(&self, max_to_process: usize) -> Result<u64, WorkerError>;
+
+    /// Extend the lease for an activity in the processing ZSET.
+    async fn extend_lease(
+        &self,
+        activity_id: uuid::Uuid,
+        extend_by: std::time::Duration,
+    ) -> Result<bool, WorkerError>;
 
     #[allow(dead_code)]
     /// Get queue statistics
@@ -71,6 +84,8 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
 pub struct ActivityQueue {
     redis_pool: Pool<RedisConnectionManager>,
     queue_name: String,
+    /// Default lease duration in milliseconds used when claiming items
+    default_lease_ms: u64,
 }
 
 impl ActivityQueue {
@@ -84,10 +99,15 @@ impl ActivityQueue {
     /// let pool: Pool<redis::aio::ConnectionManager> = unimplemented!();
     /// let queue = ActivityQueue::new(pool, "my-activities".to_string());
     /// ```
-    pub fn new(redis_pool: Pool<RedisConnectionManager>, queue_name: String) -> Self {
+    pub fn new(
+        redis_pool: Pool<RedisConnectionManager>,
+        queue_name: String,
+        default_lease_ms: u64,
+    ) -> Self {
         Self {
             redis_pool,
             queue_name,
+            default_lease_ms,
         }
     }
 
@@ -105,6 +125,11 @@ impl ActivityQueue {
     /// ```
     fn get_main_queue_key(&self) -> String {
         format!("{}:priority_queue", self.queue_name)
+    }
+
+    /// Return the Redis key used for the processing ZSET (holds leases by deadline ms)
+    fn get_processing_queue_key(&self) -> String {
+        format!("{}:processing", self.queue_name)
     }
 
     /// Compute a numeric score for the Redis sorted set that encodes priority and FIFO order.
@@ -255,6 +280,41 @@ impl ActivityQueue {
 
         Ok(())
     }
+
+    /// Best-effort removal of an activity from processing ZSET (acknowledgement)
+    async fn ack_processing(&self, activity_id: &uuid::Uuid) -> Result<(), WorkerError> {
+        let mut conn = self.redis_pool.get().await.map_err(|e| {
+            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
+        })?;
+
+        let processing_key = self.get_processing_queue_key();
+        let activity_key = format!("activity:{}", activity_id);
+
+        // Try to read exact member stored at claim time
+        let member: Option<String> = conn.hget(&activity_key, "processing_member").await.ok();
+
+        if let Some(m) = member {
+            let _: i32 = conn.zrem(&processing_key, &m).await.unwrap_or(0);
+            let _: () = conn
+                .hdel(&activity_key, ("processing_member", "lease_deadline_ms"))
+                .await
+                .unwrap_or(());
+            return Ok(());
+        }
+
+        // Fallback: scan processing zset members and find one starting with activity_id
+        let pattern_prefix = format!("{}:", activity_id);
+        // Limit scan to a reasonable number to avoid heavy ops; if large, caller should rely on mapping
+        let members: Vec<String> = conn
+            .zrange(&processing_key, 0, -1)
+            .await
+            .unwrap_or_default();
+        if let Some(found) = members.into_iter().find(|m| m.starts_with(&pattern_prefix)) {
+            let _: i32 = conn.zrem(&processing_key, &found).await.unwrap_or(0);
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -357,38 +417,71 @@ impl ActivityQueueTrait for ActivityQueue {
         })?;
 
         let queue_key = self.get_main_queue_key();
+        let processing_key = self.get_processing_queue_key();
 
-        // Use Lua script for atomic dequeue operation with timeout simulation
-        // Since Redis doesn't have BZPOPMAX with timeout, we'll implement polling with exponential backoff
+        // Poll with exponential backoff until timeout, performing atomic claim via Lua
         let start_time = std::time::Instant::now();
         let mut sleep_duration = Duration::from_millis(10);
 
         while start_time.elapsed() < timeout {
-            // Try to pop highest priority item (highest score first)
-            let result: Vec<String> = conn.zrevrange_withscores(&queue_key, 0, 0).await?;
+            // Atomic claim script: ZPOPMAX main -> ZADD processing with deadline
+            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            let mut lease_ms = self.default_lease_ms;
+            let lua = r#"
+            local item = redis.call('ZPOPMAX', KEYS[1])
+            if (item == nil) or (#item == 0) then return nil end
+            local member = item[1]
+            local deadline = tonumber(ARGV[1]) + tonumber(ARGV[2])
+            redis.call('ZADD', KEYS[2], deadline, member)
+            return member
+            "#;
 
-            if !result.is_empty() {
-                let queue_entry = &result[0];
-                // Remove from queue atomically
-                let removed: i32 = conn.zrem(&queue_key, queue_entry).await?;
+            let claimed: Option<String> = redis::cmd("EVAL")
+                .arg(lua)
+                .arg(2)
+                .arg(&queue_key)
+                .arg(&processing_key)
+                .arg(now_ms)
+                .arg(lease_ms)
+                .query_async(&mut *conn)
+                .await?;
 
-                if removed > 0 {
-                    // Successfully dequeued, parse and return
-                    let mut activity = self.parse_queue_entry(queue_entry)?;
-                    activity.status = ActivityStatus::Running;
+            if let Some(queue_entry) = claimed {
+                // Successfully claimed; parse and mark running
+                let mut activity = self.parse_queue_entry(&queue_entry)?;
+                activity.status = ActivityStatus::Running;
 
-                    // Update activity status
-                    self.update_activity_status(&activity.id, &activity.status)
+                // Extend lease if it's less than the timeout
+                if lease_ms / 1000 < activity.timeout_seconds {
+                    lease_ms = activity.timeout_seconds * 1000;
+                    self.extend_lease(activity.id, Duration::from_secs(activity.timeout_seconds))
                         .await?;
-
-                    debug!(
-                        activity_id = %activity.id,
-                        activity_type = ?activity.activity_type,
-                        priority = ?activity.priority,
-                        "Activity dequeued from optimized priority queue"
-                    );
-                    return Ok(Some(activity));
                 }
+
+                // Update activity status and remember processing member for ack
+                self.update_activity_status(&activity.id, &activity.status)
+                    .await?;
+                let activity_key = format!("activity:{}", activity.id);
+                let _: () = conn
+                    .hset_multiple(
+                        &activity_key,
+                        &[
+                            ("processing_member", queue_entry.as_str()),
+                            (
+                                "lease_deadline_ms",
+                                (now_ms + lease_ms).to_string().as_str(),
+                            ),
+                        ],
+                    )
+                    .await?;
+
+                debug!(
+                    activity_id = %activity.id,
+                    activity_type = ?activity.activity_type,
+                    priority = ?activity.priority,
+                    "Activity claimed with lease and moved to processing"
+                );
+                return Ok(Some(activity));
             }
 
             // No activities available, wait with exponential backoff
@@ -413,6 +506,8 @@ impl ActivityQueueTrait for ActivityQueue {
     /// # }
     /// ```
     async fn mark_completed(&self, activity_id: uuid::Uuid) -> Result<(), WorkerError> {
+        // Ack from processing first to avoid leaks
+        self.ack_processing(&activity_id).await?;
         self.update_activity_status(&activity_id, &ActivityStatus::Completed)
             .await?;
         info!(activity_id = %activity_id, "Activity marked as completed");
@@ -458,6 +553,8 @@ impl ActivityQueueTrait for ActivityQueue {
         let activity_id = activity.id;
 
         if !retryable {
+            // Ack and mark failed
+            self.ack_processing(&activity_id).await?;
             self.update_activity_status(&activity_id, &ActivityStatus::Failed)
                 .await?;
 
@@ -477,10 +574,13 @@ impl ActivityQueueTrait for ActivityQueue {
             retry_activity.scheduled_at = Some(scheduled_at);
 
             let retry_count = retry_activity.retry_count;
+            // Ack current processing before re-scheduling
+            self.ack_processing(&activity_id).await?;
             self.schedule_activity(retry_activity).await?;
             info!(activity_id = %activity_id, retry_count = retry_count, "Activity scheduled for retry");
         } else {
             // Move to dead letter queue
+            self.ack_processing(&activity_id).await?;
             self.update_activity_status(&activity_id, &ActivityStatus::DeadLetter)
                 .await?;
             self.add_to_dead_letter_queue(activity, error_message)
@@ -604,6 +704,153 @@ impl ActivityQueueTrait for ActivityQueue {
         }
 
         Ok(ready_activities)
+    }
+
+    /// Requeue expired items from processing back to main priority queue.
+    ///
+    /// This function requeues expired items from the processing ZSET back to the main priority queue.
+    ///
+    /// # Parameters
+    /// - `max_to_process`: The maximum number of items to requeue.
+    ///
+    /// # Returns
+    /// - `Ok(u64)` the number of items requeued.
+    /// - `WorkerError::QueueError` if the Redis connection fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # async fn example(queue: &ActivityQueue) -> Result<(), WorkerError> {
+    /// let max_to_process = 100;
+    /// let requeued = queue.requeue_expired(max_to_process).await?;
+    /// assert!(requeued > 0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    async fn requeue_expired(&self, max_to_process: usize) -> Result<u64, WorkerError> {
+        let mut conn = self.redis_pool.get().await.map_err(|e| {
+            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
+        })?;
+
+        let processing_key = self.get_processing_queue_key();
+        let main_key = self.get_main_queue_key();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        let lua = r#"
+        local now = tonumber(ARGV[1])
+        local limit = tonumber(ARGV[2])
+        local moved = 0
+        local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, limit)
+
+        for _, m in ipairs(members) do
+        if redis.call('ZREM', KEYS[1], m) == 1 then
+            local colon = string.find(m, ':', 1, true)
+            if colon then
+            local id = string.sub(m, 1, colon - 1)
+            local activity_key = 'activity:' .. id
+            local score = redis.call('HGET', activity_key, 'score')
+            if not score then score = now end
+            redis.call('ZADD', KEYS[2], score, m)
+            redis.call('HDEL', activity_key, 'processing_member', 'lease_deadline_ms')
+            -- optionally: redis.call('HSET', activity_key, 'status', '\"Pending\"')
+            else
+            -- Fallback if format unexpected
+            redis.call('ZADD', KEYS[2], now, m)
+            end
+            moved = moved + 1
+        end
+        end
+        return moved
+        "#;
+
+        let moved: i64 = redis::cmd("EVAL")
+            .arg(lua)
+            .arg(2)
+            .arg(&processing_key)
+            .arg(&main_key)
+            .arg(now_ms)
+            .arg(max_to_process as i64)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| WorkerError::QueueError(format!("requeue_expired EVAL failed: {}", e)))?;
+
+        Ok(moved as u64)
+    }
+
+    /// Extend the lease for an activity in the processing ZSET.
+    ///
+    /// This function extends the lease for an activity in the processing ZSET by the specified duration.
+    ///
+    /// # Parameters
+    /// - `activity_id`: The ID of the activity to extend the lease for.
+    /// - `extend_by`: The duration to extend the lease by.
+    ///
+    /// # Returns
+    /// - `Ok(true)` if the lease was extended successfully.
+    /// - `Ok(false)` if the activity was not found in the processing ZSET.
+    /// - `WorkerError::QueueError` if the Redis connection fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # async fn example(queue: &ActivityQueue) -> Result<(), WorkerError> {
+    /// let activity_id = uuid::Uuid::new_v4();
+    /// let extend_by = std::time::Duration::from_secs(60);
+    /// let extended = queue.extend_lease(activity_id, extend_by).await?;
+    /// assert!(extended);
+    /// # Ok(())
+    /// # }
+    /// ```
+    async fn extend_lease(
+        &self,
+        activity_id: uuid::Uuid,
+        extend_by: Duration,
+    ) -> Result<bool, WorkerError> {
+        let mut conn = self.redis_pool.get().await.map_err(|e| {
+            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
+        })?;
+
+        let processing_key = self.get_processing_queue_key();
+        let activity_key = format!("activity:{}", activity_id);
+
+        // We stored this when claiming
+        let member: Option<String> = conn.hget(&activity_key, "processing_member").await?;
+        if member.is_none() {
+            return Ok(false);
+        }
+        let member = member.unwrap();
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let extend_ms = extend_by.as_millis() as i64;
+        // New deadline = now + extend
+        let new_deadline = now_ms + extend_ms;
+
+        // Atomically extend only if member still exists in processing (XX behavior)
+        let lua = r#"
+        local member = ARGV[1]
+        local new_deadline = tonumber(ARGV[2])
+
+        if redis.call('ZSCORE', KEYS[1], member) == false then
+          return 0
+        end
+
+        redis.call('ZADD', KEYS[1], 'XX', new_deadline, member)
+        redis.call('HSET', KEYS[2], 'lease_deadline_ms', tostring(new_deadline))
+        return 1
+        "#;
+
+        let updated: i32 = redis::cmd("EVAL")
+            .arg(lua)
+            .arg(2)
+            .arg(&processing_key)
+            .arg(&activity_key)
+            .arg(&member)
+            .arg(new_deadline)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| WorkerError::QueueError(format!("extend_lease EVAL failed: {}", e)))?;
+
+        Ok(updated == 1)
     }
 
     /// Returns aggregated queue statistics (counts) for the Redis-backed activity queue.
@@ -777,6 +1024,7 @@ mod tests {
                 .await
                 .unwrap(),
             "test".to_string(),
+            60_000,
         );
 
         let now = Utc::now();
