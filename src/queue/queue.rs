@@ -820,37 +820,36 @@ impl ActivityQueueTrait for ActivityQueue {
         }
         let member = member.unwrap();
 
-        let now_ms = chrono::Utc::now().timestamp_millis();
         let extend_ms = extend_by.as_millis() as i64;
-        // New deadline = now + extend
-        let new_deadline = now_ms + extend_ms;
 
-        // Atomically extend only if member still exists in processing (XX behavior)
+        // Atomically extend from current deadline
         let lua = r#"
         local member = ARGV[1]
-        local new_deadline = tonumber(ARGV[2])
+        local extend_ms = tonumber(ARGV[2])
 
-        if redis.call('ZSCORE', KEYS[1], member) == false then
+        local current_deadline = redis.call('ZSCORE', KEYS[1], member)
+        if current_deadline == false then
           return 0
         end
 
+        local new_deadline = tonumber(current_deadline) + extend_ms
         redis.call('ZADD', KEYS[1], 'XX', new_deadline, member)
         redis.call('HSET', KEYS[2], 'lease_deadline_ms', tostring(new_deadline))
-        return 1
+        return new_deadline
         "#;
 
-        let updated: i32 = redis::cmd("EVAL")
+        let new_deadline: i64 = redis::cmd("EVAL")
             .arg(lua)
             .arg(2)
             .arg(&processing_key)
             .arg(&activity_key)
             .arg(&member)
-            .arg(new_deadline)
+            .arg(extend_ms)
             .query_async(&mut *conn)
             .await
             .map_err(|e| WorkerError::QueueError(format!("extend_lease EVAL failed: {}", e)))?;
 
-        Ok(updated == 1)
+        Ok(new_deadline > 0)
     }
 
     /// Returns aggregated queue statistics (counts) for the Redis-backed activity queue.
