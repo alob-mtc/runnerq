@@ -8,7 +8,7 @@ use bb8_redis::{bb8::Pool, RedisConnectionManager};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Trait defining the interface for activity queue operations
 #[async_trait]
@@ -291,27 +291,41 @@ impl ActivityQueue {
         let activity_key = format!("activity:{}", activity_id);
 
         // Try to read exact member stored at claim time
-        let member: Option<String> = conn.hget(&activity_key, "processing_member").await.ok();
+        let member: Option<String> = match conn.hget(&activity_key, "processing_member").await {
+            Ok(m) => m,
+            Err(e) => {
+                error!(activity_id = %activity_id, error = %e, "ack_processing: HGET processing_member failed");
+                None
+            }
+        };
 
         if let Some(m) = member {
-            let _: i32 = conn.zrem(&processing_key, &m).await.unwrap_or(0);
-            let _: () = conn
-                .hdel(&activity_key, ("processing_member", "lease_deadline_ms"))
+            match conn.zrem::<_, _, i32>(&processing_key, &m).await {
+                Ok(removed) => {
+                    if removed == 0 {
+                        warn!(activity_id = %activity_id, "ack_processing: member not found in processing ZSET during ZREM");
+                    }
+                }
+                Err(e) => {
+                    error!(activity_id = %activity_id, error = %e, "ack_processing: ZREM processing member failed");
+                }
+            }
+
+            if let Err(e) = conn
+                .hdel::<_, _, ()>(&activity_key, ("processing_member", "lease_deadline_ms"))
                 .await
-                .unwrap_or(());
+            {
+                error!(activity_id = %activity_id, error = %e, "ack_processing: HDEL of processing fields failed");
+            }
             return Ok(());
         }
 
-        // Fallback: scan processing zset members and find one starting with activity_id
-        let pattern_prefix = format!("{}:", activity_id);
-        // Limit scan to a reasonable number to avoid heavy ops; if large, caller should rely on mapping
-        let members: Vec<String> = conn
-            .zrange(&processing_key, 0, -1)
-            .await
-            .unwrap_or_default();
-        if let Some(found) = members.into_iter().find(|m| m.starts_with(&pattern_prefix)) {
-            let _: i32 = conn.zrem(&processing_key, &found).await.unwrap_or(0);
-        }
+        // No fallback: avoid unbounded scans that can OOM. Missing processing_member indicates
+        // state drift; rely on the reaper to clean up.
+        error!(
+            activity_id = %activity_id,
+            "ack_processing: missing processing_member; skipping unbounded scan and leaving cleanup to reaper"
+        );
 
         Ok(())
     }
@@ -426,7 +440,7 @@ impl ActivityQueueTrait for ActivityQueue {
         while start_time.elapsed() < timeout {
             // Atomic claim script: ZPOPMAX main -> ZADD processing with deadline
             let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-            let mut lease_ms = self.default_lease_ms;
+            let lease_ms = self.default_lease_ms;
             let lua = r#"
             local item = redis.call('ZPOPMAX', KEYS[1])
             if (item == nil) or (#item == 0) then return nil end
@@ -451,13 +465,6 @@ impl ActivityQueueTrait for ActivityQueue {
                 let mut activity = self.parse_queue_entry(&queue_entry)?;
                 activity.status = ActivityStatus::Running;
 
-                // Extend lease if it's less than the timeout
-                if lease_ms / 1000 < activity.timeout_seconds {
-                    lease_ms = activity.timeout_seconds * 1000;
-                    self.extend_lease(activity.id, Duration::from_secs(activity.timeout_seconds))
-                        .await?;
-                }
-
                 // Update activity status and remember processing member for ack
                 self.update_activity_status(&activity.id, &activity.status)
                     .await?;
@@ -474,6 +481,21 @@ impl ActivityQueueTrait for ActivityQueue {
                         ],
                     )
                     .await?;
+
+                // Extend lease if it's less than the timeout
+                if lease_ms / 1000 < activity.timeout_seconds {
+                    let new_lease_ms = activity.timeout_seconds * 1000;
+                    if self
+                        .extend_lease(activity.id, Duration::from_secs(activity.timeout_seconds))
+                        .await?
+                    {
+                        // Successfully extended, update stored metadata
+                        let new_deadline = now_ms + new_lease_ms;
+                        let _: () = conn
+                            .hset(&activity_key, "lease_deadline_ms", new_deadline.to_string())
+                            .await?;
+                    }
+                }
 
                 debug!(
                     activity_id = %activity.id,
@@ -752,7 +774,7 @@ impl ActivityQueueTrait for ActivityQueue {
             if not score then score = now end
             redis.call('ZADD', KEYS[2], score, m)
             redis.call('HDEL', activity_key, 'processing_member', 'lease_deadline_ms')
-            -- optionally: redis.call('HSET', activity_key, 'status', '\"Pending\"')
+            redis.call('HSET', activity_key, 'status', '\"Pending\"')
             else
             -- Fallback if format unexpected
             redis.call('ZADD', KEYS[2], now, m)
