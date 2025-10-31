@@ -484,15 +484,8 @@ impl ActivityQueueTrait for ActivityQueue {
 
                 // Extend lease if it's less than the timeout
                 if lease_ms / 1000 < activity.timeout_seconds {
-                    let new_lease_ms = activity.timeout_seconds * 1000;
-                    if self
-                        .extend_lease(activity.id, Duration::from_secs(activity.timeout_seconds))
-                        .await?
-                    {
-                        // Successfully extended, update stored metadata
-                        if self.extend_lease(activity.id, Duration::from_secs(activity.timeout_seconds)).await? {
-                            // Successfully extended, metadata already updated by extend_lease
-                        }
+                    self.extend_lease(activity.id, Duration::from_secs(activity.timeout_seconds))
+                        .await?;
                 }
 
                 debug!(
