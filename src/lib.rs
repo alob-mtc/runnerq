@@ -209,7 +209,9 @@ pub use crate::config::WorkerConfig;
 pub use crate::queue::queue::{ActivityQueue, QueueStats};
 pub use crate::runner::error::WorkerError;
 pub use crate::runner::redis::RedisConfig;
-pub use crate::runner::runner::{ActivityExecutor, WorkerEngine, WorkerEngineBuilder, ActivityBuilder, MetricsSink};
+pub use crate::runner::runner::{
+    ActivityBuilder, ActivityExecutor, MetricsSink, WorkerEngine, WorkerEngineBuilder,
+};
 pub use activity::activity::{
     ActivityContext, ActivityFuture, ActivityHandler, ActivityHandlerResult, ActivityPriority,
 };

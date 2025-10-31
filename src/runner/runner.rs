@@ -1,4 +1,6 @@
-use crate::activity::activity::{ActivityFuture, ActivityHandlerRegistry, ActivityOption, ActivityPriority};
+use crate::activity::activity::{
+    ActivityFuture, ActivityHandlerRegistry, ActivityOption, ActivityPriority,
+};
 use crate::config::WorkerConfig;
 use crate::queue::queue::{ActivityQueueTrait, ActivityResult, ResultState};
 use crate::runner::error::WorkerError;
@@ -12,8 +14,8 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{watch, RwLock, Semaphore};
-use tracing::{debug, error, info, warn};
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
 
 /// Optional metrics sink to expose counters without coupling to a specific backend.
 ///
@@ -62,7 +64,7 @@ pub trait MetricsSink: Send + Sync + 'static {
     /// This is typically used for counting events like activity completions,
     /// retries, failures, etc.
     fn inc_counter(&self, name: &str, value: u64);
-    
+
     /// Record a duration metric.
     ///
     /// This is typically used for measuring execution times, queue wait times, etc.
@@ -85,7 +87,7 @@ pub trait MetricsSink: Send + Sync + 'static {
 /// use std::time::Duration;
 ///
 /// let metrics = NoopMetrics;
-/// 
+///
 /// // These calls do nothing
 /// metrics.inc_counter("activities_completed", 1);
 /// metrics.observe_duration("activity_execution", Duration::from_secs(5));
@@ -196,7 +198,11 @@ impl WorkerEngine {
     pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         Self {
-            activity_queue: Arc::new(ActivityQueue::new(redis_pool, config.queue_name.clone())),
+            activity_queue: Arc::new(ActivityQueue::new(
+                redis_pool,
+                config.queue_name.clone(),
+                config.lease_ms.unwrap_or(60_000),
+            )),
             activity_handlers: ActivityHandlerRegistry::new(),
             config,
             running: Arc::new(RwLock::new(false)),
@@ -230,12 +236,12 @@ impl WorkerEngine {
     ///     .await?;
     /// # Ok(())
     /// # }
-    /// 
+    ///
     /// // With custom Redis configuration and metrics
     /// # async fn example_with_redis_config() -> Result<(), Box<dyn std::error::Error>> {
     /// use runner_q::{RedisConfig, MetricsSink};
     /// use std::sync::Arc;
-    /// 
+    ///
     /// let redis_config = RedisConfig {
     ///     max_size: 100,
     ///     min_idle: 10,
@@ -243,7 +249,7 @@ impl WorkerEngine {
     ///     idle_timeout: Duration::from_secs(600),
     ///     max_lifetime: Duration::from_secs(3600),
     /// };
-    /// 
+    ///
     /// // Custom metrics implementation
     /// struct PrometheusMetrics;
     /// impl MetricsSink for PrometheusMetrics {
@@ -254,7 +260,7 @@ impl WorkerEngine {
     ///         println!("Duration {}: {:?}", name, duration);
     ///     }
     /// }
-    /// 
+    ///
     /// let engine = WorkerEngine::builder()
     ///     .redis_url("redis://localhost:6379")
     ///     .queue_name("my_app")
@@ -269,8 +275,6 @@ impl WorkerEngine {
     pub fn builder() -> WorkerEngineBuilder {
         WorkerEngineBuilder::new()
     }
-
-
 
     /// Starts the worker engine and manages its full execution lifecycle.
     ///
@@ -332,6 +336,10 @@ impl WorkerEngine {
         let scheduled_handle = self.start_scheduled_activities_processor().await;
         join_handles.push(scheduled_handle);
 
+        // Reaper processor for re-queueing expired processing items
+        let reaper_handle = self.start_reaper_processor().await;
+        join_handles.push(reaper_handle);
+
         // Worker loops (now return Result)
         for worker_id in 0..self.config.max_concurrent_activities {
             let handle = self.start_worker_loop(worker_id, semaphore.clone()).await;
@@ -376,18 +384,18 @@ impl WorkerEngine {
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut engine = WorkerEngine::new(redis_pool, config);
-    /// 
+    ///
     /// // Start the engine in a background task
     /// let engine_handle = tokio::spawn(async move {
     ///     engine.start().await
     /// });
-    /// 
+    ///
     /// // Let it run for a while
     /// sleep(Duration::from_secs(10)).await;
-    /// 
+    ///
     /// // Gracefully stop the engine
     /// engine.stop().await;
-    /// 
+    ///
     /// // Wait for the engine to finish
     /// engine_handle.await??;
     /// # Ok(())
@@ -543,7 +551,9 @@ impl WorkerEngine {
                     retry_count: activity.retry_count,
                     metadata: activity.metadata.clone(),
                     cancel_token: cancel_token.child_token(),
-                    activity_executor: Arc::new(WorkerEngineWrapper::new(activity_queue_for_context.clone())),
+                    activity_executor: Arc::new(WorkerEngineWrapper::new(
+                        activity_queue_for_context.clone(),
+                    )),
                 };
 
                 let activity_timeout = Duration::from_secs(activity.timeout_seconds);
@@ -702,6 +712,36 @@ impl WorkerEngine {
                 }
             }
             debug!("Scheduled activities processor stopped");
+            Ok(())
+        })
+    }
+
+    /// Spawns a background reaper that moves expired leased items back to the main queue.
+    async fn start_reaper_processor(&self) -> tokio::task::JoinHandle<Result<(), WorkerError>> {
+        let activity_queue = self.activity_queue.clone();
+        let running = self.running.clone();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        let interval = Duration::from_secs(self.config.reaper_interval_seconds.unwrap_or(5).max(1));
+        let batch_size = self.config.reaper_batch_size.unwrap_or(100);
+
+        tokio::spawn(async move {
+            debug!("Starting reaper processor");
+            while *running.read().await {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
+                if let Err(e) = activity_queue.requeue_expired(batch_size).await {
+                    error!(error = %e, "Reaper failed to requeue expired items");
+                }
+
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {},
+                    _ = shutdown_rx.changed() => break,
+                }
+            }
+            debug!("Reaper processor stopped");
             Ok(())
         })
     }
@@ -950,7 +990,6 @@ impl WorkerEngineBuilder {
         self
     }
 
-
     /// Builds the WorkerEngine with the configured settings.
     ///
     /// # Returns
@@ -962,7 +1001,9 @@ impl WorkerEngineBuilder {
     ///
     /// Returns `WorkerError` if Redis connection cannot be established.
     pub async fn build(self) -> Result<WorkerEngine, WorkerError> {
-        let redis_url = self.redis_url.unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        let redis_url = self
+            .redis_url
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
         let queue_name = self.queue_name.unwrap_or_else(|| "default".to_string());
         let max_concurrent_activities = self.max_workers.unwrap_or(10);
         let schedule_poll_interval_seconds = self.schedule_poll_interval.map_or(5, |d| d.as_secs());
@@ -972,6 +1013,9 @@ impl WorkerEngineBuilder {
             max_concurrent_activities,
             redis_url: redis_url.clone(),
             schedule_poll_interval_seconds: Some(schedule_poll_interval_seconds),
+            lease_ms: Some(60_000),
+            reaper_interval_seconds: Some(5),
+            reaper_batch_size: Some(100),
         };
 
         let redis_pool = if let Some(redis_config) = self.redis_config {
@@ -981,7 +1025,7 @@ impl WorkerEngineBuilder {
         };
 
         let mut worker_engine = WorkerEngine::new(redis_pool, config);
-        
+
         // Apply custom metrics if provided
         if let Some(metrics) = self.metrics {
             worker_engine.with_metrics(metrics);
@@ -1106,11 +1150,15 @@ impl<'a> ActivityBuilder<'a> {
     ///
     /// Returns `WorkerError` if the activity cannot be enqueued or if there are Redis connection issues.
     pub async fn execute(self) -> Result<ActivityFuture, WorkerError> {
-        let payload = self.payload.ok_or_else(|| {
-            WorkerError::QueueError("Activity payload is required".to_string())
-        })?;
+        let payload = self
+            .payload
+            .ok_or_else(|| WorkerError::QueueError("Activity payload is required".to_string()))?;
 
-        let option = if self.priority.is_some() || self.max_retries.is_some() || self.timeout.is_some() || self.delay.is_some() {
+        let option = if self.priority.is_some()
+            || self.max_retries.is_some()
+            || self.timeout.is_some()
+            || self.delay.is_some()
+        {
             Some(ActivityOption {
                 priority: self.priority,
                 max_retries: self.max_retries.unwrap_or(3),
@@ -1121,7 +1169,9 @@ impl<'a> ActivityBuilder<'a> {
             None
         };
 
-        self.engine.execute_activity(self.activity_type, payload, option).await
+        self.engine
+            .execute_activity(self.activity_type, payload, option)
+            .await
     }
 }
 
@@ -1202,7 +1252,6 @@ pub trait ActivityExecutor: Send + Sync {
 pub struct WorkerEngineWrapper {
     activity_queue: Arc<dyn ActivityQueueTrait>,
 }
-
 
 impl WorkerEngineWrapper {
     pub(crate) fn new(activity_queue: Arc<dyn ActivityQueueTrait>) -> Self {

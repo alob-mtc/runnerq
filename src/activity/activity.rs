@@ -58,7 +58,6 @@ pub enum ActivityPriority {
     Critical = 4,
 }
 
-
 /// Activity status tracking throughout the activity lifecycle.
 ///
 /// Activities progress through these states as they are processed by the worker engine.
@@ -109,18 +108,18 @@ pub(crate) struct ActivityOption {
     /// When `None`, uses the default priority (Normal).
     /// Higher priority activities are processed before lower priority ones.
     pub priority: Option<ActivityPriority>,
-    
+
     /// Maximum number of retry attempts for failed activities.
     ///
     /// Set to `0` for unlimited retries (use with caution).
     /// When retries are exhausted, the activity is moved to the dead letter queue.
     pub max_retries: u32,
-    
+
     /// Maximum execution time in seconds before the activity times out.
     ///
     /// Timed out activities are automatically retried unless max_retries is exceeded.
     pub timeout_seconds: u64,
-    
+
     /// Delay in seconds before the activity should be executed.
     ///
     /// When `None`, the activity is executed immediately.

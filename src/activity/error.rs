@@ -39,7 +39,7 @@ pub enum ActivityError {
     /// Use this for temporary failures like network timeouts, temporary service
     /// unavailability, or other transient issues that might resolve on retry.
     Retry(String),
-    
+
     /// Error that should not trigger a retry.
     ///
     /// Use this for permanent failures like invalid input data, authentication
