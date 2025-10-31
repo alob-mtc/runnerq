@@ -490,11 +490,9 @@ impl ActivityQueueTrait for ActivityQueue {
                         .await?
                     {
                         // Successfully extended, update stored metadata
-                        let new_deadline = now_ms + new_lease_ms;
-                        let _: () = conn
-                            .hset(&activity_key, "lease_deadline_ms", new_deadline.to_string())
-                            .await?;
-                    }
+                        if self.extend_lease(activity.id, Duration::from_secs(activity.timeout_seconds)).await? {
+                            // Successfully extended, metadata already updated by extend_lease
+                        }
                 }
 
                 debug!(
