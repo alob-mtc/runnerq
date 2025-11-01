@@ -379,8 +379,9 @@ impl ActivityQueueTrait for ActivityQueue {
             )
             .await?;
 
-        // Set TTL for activity metadata (24 hours)
-        let _: () = conn.expire(&activity_key, 86400).await?;
+        // Set TTL for activity metadata (7 days)
+        let days = 7 * 24 * 60 * 60;
+        let _: () = conn.expire(&activity_key, days).await?;
 
         info!(
             activity_id = %activity.id,
