@@ -1,0 +1,48 @@
+name-template: "v$NEXT_PATCH_VERSION"
+tag-template: "v$NEXT_PATCH_VERSION"
+change-template: "- $TITLE (#$NUMBER) by @$AUTHOR"
+
+categories:
+  - title: "⚠️ Breaking Changes"
+    labels:
+      - breaking
+  - title: "✨ Features"
+    labels:
+      - feature
+      - enhancement
+  - title: "🐛 Fixes"
+    labels:
+      - bug
+      - fix
+  - title: "🧰 Maintenance"
+    labels:
+      - chore
+      - refactor
+  - title: "📝 Docs"
+    labels:
+      - docs
+  - title: "⚡ Performance"
+    labels:
+      - performance
+
+exclude-labels:
+  - skip-changelog
+
+version-resolver:
+  major:
+    labels:
+      - "major"
+  minor:
+    labels:
+      - "minor"
+  patch:
+    labels:
+      - "patch"
+  default: patch
+template: |
+  ## What's Changed
+
+  $CHANGES
+
+  ### Contributors
+  $CONTRIBUTORS
