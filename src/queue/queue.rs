@@ -485,8 +485,11 @@ impl ActivityQueueTrait for ActivityQueue {
 
                 // Extend lease if it's less than the timeout
                 if lease_ms / 1000 < activity.timeout_seconds {
-                    self.extend_lease(activity.id, Duration::from_secs(activity.timeout_seconds))
-                        .await?;
+                    let delta = activity.timeout_seconds - (lease_ms / 1000);
+                    if delta > 0 {
+                        self.extend_lease(activity.id, Duration::from_secs(delta))
+                            .await?;
+                    }
                 }
 
                 debug!(
