@@ -396,3 +396,17 @@ impl ActivityFuture {
         .map_err(|_| crate::WorkerError::Timeout)?
     }
 }
+
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use serde_json::json;
+    use crate::test_suite::{TestResult, ActivityBuilder, Timer, setup_redis_test_environment};
+
+    
+}
+
