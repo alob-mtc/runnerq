@@ -153,6 +153,14 @@ impl ActivityQueue {
         format!("{}:processing", self.queue_name)
     }
 
+    fn get_dead_letter_queue_key(&self) -> String {
+        format!("{}:dead_letter_queue", self.queue_name)
+    }
+
+    fn get_scheduled_activities_key(&self) -> String {
+        format!("{}:scheduled_activities", self.queue_name)
+    }
+
     pub fn redis_pool(&self) -> Pool<RedisConnectionManager> {
         self.redis_pool.clone()
     }
@@ -451,9 +459,10 @@ impl ActivityQueue {
             "failed_at": chrono::Utc::now()
         });
 
+        let dead_letter_key = self.get_dead_letter_queue_key();
         let _: () = conn
             .rpush(
-                "dead_letter_queue",
+                &dead_letter_key,
                 serde_json::to_string(&dead_letter_entry)?,
             )
             .await?;
@@ -965,7 +974,7 @@ impl ActivityQueueTrait for ActivityQueue {
         })?;
 
         let activity_json = serde_json::to_string(&activity)?;
-        let scheduled_key = "scheduled_activities";
+        let scheduled_key = self.get_scheduled_activities_key();
 
         let scheduled_at = activity
             .scheduled_at
@@ -974,7 +983,7 @@ impl ActivityQueueTrait for ActivityQueue {
 
         // Add to sorted set with timestamp as score
         let _: () = conn
-            .zadd(scheduled_key, activity_json, scheduled_at)
+            .zadd(&scheduled_key, activity_json, scheduled_at)
             .await?;
 
         let mut snapshot = match self.load_snapshot(&mut conn, &activity.id).await {
@@ -1035,18 +1044,18 @@ impl ActivityQueueTrait for ActivityQueue {
         })?;
 
         let now = chrono::Utc::now().timestamp();
-        let scheduled_key = "scheduled_activities";
+        let scheduled_key = self.get_scheduled_activities_key();
 
         // Get activities that are ready to run
         let activity_jsons: Vec<String> = conn
-            .zrangebyscore_limit(scheduled_key, 0, now, 0, 100)
+            .zrangebyscore_limit(&scheduled_key, 0, now, 0, 100)
             .await?;
 
         let mut ready_activities = Vec::new();
 
         for activity_json in activity_jsons {
             // Remove from scheduled set
-            let _: () = conn.zrem(scheduled_key, &activity_json).await?;
+            let _: () = conn.zrem(&scheduled_key, &activity_json).await?;
 
             // Parse and enqueue activity
             match serde_json::from_str::<Activity>(&activity_json) {

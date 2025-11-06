@@ -81,8 +81,9 @@ impl QueueInspector {
     ) -> Result<Vec<ActivitySnapshot>, WorkerError> {
         let mut conn = self.connection().await?;
         let range = self.slice_to_range(offset, limit);
+        let scheduled_key = self.scheduled_activities_key();
         let members: Vec<String> = conn
-            .zrange("scheduled_activities", *range.start(), *range.end())
+            .zrange(&scheduled_key, *range.start(), *range.end())
             .await
             .map_err(Self::map_redis_error)?;
         self.collect_snapshots(&mut conn, &members).await
@@ -95,8 +96,9 @@ impl QueueInspector {
     ) -> Result<Vec<DeadLetterRecord>, WorkerError> {
         let mut conn = self.connection().await?;
         let range = self.slice_to_range(offset, limit);
+        let dead_letter_key = self.dead_letter_queue_key();
         let entries: Vec<String> = conn
-            .lrange("dead_letter_queue", *range.start(), *range.end())
+            .lrange(&dead_letter_key, *range.start(), *range.end())
             .await
             .map_err(Self::map_redis_error)?;
 
@@ -301,12 +303,14 @@ impl QueueInspector {
             .await
             .map_err(Self::map_redis_error)?;
 
+        let scheduled_key = self.scheduled_activities_key();
         let scheduled_count: u64 = conn
-            .zcard("scheduled_activities")
+            .zcard(&scheduled_key)
             .await
             .map_err(Self::map_redis_error)?;
+        let dead_letter_key = self.dead_letter_queue_key();
         let dead_letter_count: u64 = conn
-            .llen("dead_letter_queue")
+            .llen(&dead_letter_key)
             .await
             .map_err(Self::map_redis_error)?;
 
@@ -392,6 +396,14 @@ impl QueueInspector {
 
     fn processing_queue_key(&self) -> String {
         format!("{}:processing", self.queue_name)
+    }
+
+    fn dead_letter_queue_key(&self) -> String {
+        format!("{}:dead_letter_queue", self.queue_name)
+    }
+
+    fn scheduled_activities_key(&self) -> String {
+        format!("{}:scheduled_activities", self.queue_name)
     }
 
     fn activity_events_key(&self, activity_id: &Uuid) -> String {
