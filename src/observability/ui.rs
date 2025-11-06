@@ -1,7 +1,10 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{Html, IntoResponse, Response, sse::{Event, KeepAlive, Sse}},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Html, IntoResponse, Response,
+    },
     routing::get,
     Json, Router,
 };
@@ -26,14 +29,14 @@ struct Pagination {
 }
 
 /// Creates a RunnerQ Console UI router that can be mounted on any path.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```rust,no_run
 /// use runner_q::{WorkerConfig, QueueInspector};
 /// use runner_q::observability::runnerq_ui;
 /// use axum::Router;
-/// 
+///
 /// # async fn example() -> anyhow::Result<()> {
 /// let cfg = WorkerConfig {
 ///     queue_name: "my_app".to_string(),
@@ -58,13 +61,22 @@ struct Pagination {
 /// ```
 pub fn runnerq_ui(inspector: QueueInspector) -> Router {
     let state = UiState { inspector };
-    
+
     Router::new()
         .route("/", get(serve_ui))
         .route("/api/observability/stats", get(get_stats))
-        .route("/api/observability/activities/:key", get(activity_collection_or_detail))
-        .route("/api/observability/activities/:id/events", get(activity_events))
-        .route("/api/observability/activities/:id/result", get(activity_result))
+        .route(
+            "/api/observability/activities/:key",
+            get(activity_collection_or_detail),
+        )
+        .route(
+            "/api/observability/activities/:id/events",
+            get(activity_events),
+        )
+        .route(
+            "/api/observability/activities/:id/result",
+            get(activity_result),
+        )
         .route("/api/observability/dead-letter", get(dead_letters))
         .route("/api/observability/stream", get(event_stream))
         .with_state(state)
@@ -72,14 +84,14 @@ pub fn runnerq_ui(inspector: QueueInspector) -> Router {
 
 /// Creates just the API routes for observability data.
 /// Use this if you want to serve the UI separately or use a custom UI.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```rust,no_run
 /// use runner_q::{WorkerConfig, QueueInspector};
 /// use runner_q::observability::observability_api;
 /// use axum::Router;
-/// 
+///
 /// # async fn example() -> anyhow::Result<()> {
 /// let cfg = WorkerConfig {
 ///     queue_name: "my_app".to_string(),
@@ -101,7 +113,7 @@ pub fn runnerq_ui(inspector: QueueInspector) -> Router {
 /// ```
 pub fn observability_api(inspector: QueueInspector) -> Router {
     let state = UiState { inspector };
-    
+
     Router::new()
         .route("/stats", get(get_stats))
         .route("/activities/:key", get(activity_collection_or_detail))
@@ -230,22 +242,20 @@ async fn event_stream(
         .inspector
         .subscribe_events()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    
+
     // Convert broadcast receiver to stream
-    let stream = BroadcastStream::new(receiver)
-        .filter_map(|result| async move {
-            match result {
-                Ok(activity_event) => {
-                    // Serialize event as JSON
-                    match serde_json::to_string(&activity_event) {
-                        Ok(json) => Some(Ok(Event::default().data(json))),
-                        Err(_) => None,
-                    }
+    let stream = BroadcastStream::new(receiver).filter_map(|result| async move {
+        match result {
+            Ok(activity_event) => {
+                // Serialize event as JSON
+                match serde_json::to_string(&activity_event) {
+                    Ok(json) => Some(Ok(Event::default().data(json))),
+                    Err(_) => None,
                 }
-                Err(_) => None, // Lagged/closed
             }
-        });
-    
+            Err(_) => None, // Lagged/closed
+        }
+    });
+
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
-

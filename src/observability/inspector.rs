@@ -149,7 +149,8 @@ impl QueueInspector {
                 // Try to extract UUID from key
                 if let Some(uuid_str) = key.strip_prefix("activity:") {
                     if let Ok(activity_id) = Uuid::parse_str(uuid_str) {
-                        if let Ok(Some(snapshot)) = self.load_snapshot(&mut conn, &activity_id).await
+                        if let Ok(Some(snapshot)) =
+                            self.load_snapshot(&mut conn, &activity_id).await
                         {
                             // Only include completed activities
                             if snapshot.status == ActivityStatus::Completed {
@@ -157,7 +158,7 @@ impl QueueInspector {
                                     skipped += 1;
                                     continue;
                                 }
-                                
+
                                 snapshots.push(snapshot);
                                 collected += 1;
 
@@ -204,15 +205,14 @@ impl QueueInspector {
     ) -> Result<Option<serde_json::Value>, WorkerError> {
         let mut conn = self.connection().await?;
         let result_key = format!("result:{}", activity_id);
-        let result_json: Option<String> = conn
-            .get(&result_key)
-            .await
-            .map_err(Self::map_redis_error)?;
+        let result_json: Option<String> =
+            conn.get(&result_key).await.map_err(Self::map_redis_error)?;
 
         match result_json {
             Some(json) => {
-                let value: serde_json::Value = serde_json::from_str(&json)
-                    .map_err(|e| WorkerError::QueueError(format!("Failed to parse result: {}", e)))?;
+                let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
+                    WorkerError::QueueError(format!("Failed to parse result: {}", e))
+                })?;
                 Ok(Some(value))
             }
             None => Ok(None),
@@ -249,7 +249,7 @@ impl QueueInspector {
 
         let queue_key = self.main_queue_key();
         let processing_key = self.processing_queue_key();
-        
+
         let total_pending: u64 = conn
             .zcard(&queue_key)
             .await

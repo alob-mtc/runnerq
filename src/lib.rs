@@ -207,7 +207,7 @@ pub mod worker;
 
 // Re-export main types for easy access
 pub use crate::config::WorkerConfig;
-pub use crate::observability::{DeadLetterRecord, QueueInspector, observability_api, runnerq_ui};
+pub use crate::observability::{observability_api, runnerq_ui, DeadLetterRecord, QueueInspector};
 pub use crate::queue::queue::{
     ActivityEvent, ActivityEventType, ActivityQueue, ActivitySnapshot, QueueStats,
 };

@@ -240,7 +240,7 @@ impl WorkerEngine {
             self.queue_core.redis_pool(),
             self.queue_core.queue_name().to_string(),
         );
-        
+
         // Get existing event channel or create one for the inspector
         if let Some(tx) = self.queue_core.event_channel() {
             inspector = inspector.with_event_stream(tx);
@@ -250,7 +250,7 @@ impl WorkerEngine {
             self.queue_core.set_event_channel(tx.clone());
             inspector = inspector.with_event_stream(tx);
         }
-        
+
         inspector
     }
 

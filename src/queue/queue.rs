@@ -57,6 +57,7 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
     /// Requeue expired processing items back to main queue (reaper)
     async fn requeue_expired(&self, max_to_process: usize) -> Result<u64, WorkerError>;
 
+    #[allow(dead_code)]
     /// Extend the lease for an activity in the processing ZSET.
     async fn extend_lease(
         &self,
