@@ -161,6 +161,10 @@ impl ActivityQueue {
         format!("{}:scheduled_activities", self.queue_name)
     }
 
+    fn get_completed_activities_key(&self) -> String {
+        format!("{}:completed_activities", self.queue_name)
+    }
+
     pub fn redis_pool(&self) -> Pool<RedisConnectionManager> {
         self.redis_pool.clone()
     }
@@ -285,6 +289,40 @@ impl ActivityQueue {
                 "Invalid queue entry format".to_string(),
             ))
         }
+    }
+
+    /// Add an activity to the completed activities sorted set
+    /// Score is the completion timestamp for chronological ordering
+    async fn add_to_completed_set(
+        &self,
+        conn: &mut PooledConnection<'_, RedisConnectionManager>,
+        activity_id: &uuid::Uuid,
+        completed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), WorkerError> {
+        let completed_key = self.get_completed_activities_key();
+        let score = completed_at.timestamp();
+        let member = activity_id.to_string();
+        
+        let _: () = conn
+            .zadd(&completed_key, &member, score)
+            .await
+            .map_err(|e| WorkerError::QueueError(format!("Failed to add to completed set: {}", e)))?;
+        
+        // Set expiry on the completed set to 7 days (if not already set)
+        let ttl: i64 = conn
+            .ttl(&completed_key)
+            .await
+            .map_err(|e| WorkerError::QueueError(format!("Failed to check TTL: {}", e)))?;
+        
+        if ttl == -1 {
+            // No expiry set, set it to 7 days
+            let _: () = conn
+                .expire(&completed_key, Self::SNAPSHOT_TTL_SECONDS as i64)
+                .await
+                .map_err(|e| WorkerError::QueueError(format!("Failed to set expiry: {}", e)))?;
+        }
+        
+        Ok(())
     }
 
     async fn write_snapshot(
@@ -790,6 +828,10 @@ impl ActivityQueueTrait for ActivityQueue {
         snapshot.set_last_error(None, None);
 
         self.write_snapshot(&mut conn, &snapshot).await?;
+        
+        // Add to completed activities sorted set for efficient querying
+        self.add_to_completed_set(&mut conn, &activity.id, completed_at).await?;
+        
         self.record_event(
             &mut conn,
             &activity.id,

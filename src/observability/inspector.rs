@@ -130,73 +130,25 @@ impl QueueInspector {
         limit: usize,
     ) -> Result<Vec<ActivitySnapshot>, WorkerError> {
         let mut conn = self.connection().await?;
-        let mut snapshots = Vec::new();
-        let mut cursor = 0u64;
-        let scan_count = 100; // Scan batch size
-        let skip_count = offset;
-        let mut skipped = 0;
-        let mut collected = 0;
-
-        // Scan for activity:* keys and filter by status
-        loop {
-            let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg("activity:*")
-                .arg("COUNT")
-                .arg(scan_count)
-                .query_async(&mut *conn)
-                .await
-                .map_err(Self::map_redis_error)?;
-
-            for key in keys {
-                // Skip keys for events (they have :events suffix)
-                if key.contains(":events") {
-                    continue;
+        let completed_key = self.completed_activities_key();
+        
+        // Use ZREVRANGE to get completed activities in reverse chronological order (most recent first)
+        // This is O(log(N)+M) where N is total items and M is the number we're retrieving
+        let range = self.slice_to_range(offset, limit);
+        let members: Vec<String> = conn
+            .zrevrange(&completed_key, *range.start(), *range.end())
+            .await
+            .map_err(Self::map_redis_error)?;
+        
+        let mut snapshots = Vec::with_capacity(members.len());
+        for member in members {
+            if let Ok(activity_id) = Uuid::parse_str(&member) {
+                if let Ok(Some(snapshot)) = self.load_snapshot(&mut conn, &activity_id).await {
+                    snapshots.push(snapshot);
                 }
-
-                // Try to extract UUID from key
-                if let Some(uuid_str) = key.strip_prefix("activity:") {
-                    if let Ok(activity_id) = Uuid::parse_str(uuid_str) {
-                        if let Ok(Some(snapshot)) =
-                            self.load_snapshot(&mut conn, &activity_id).await
-                        {
-                            // Only include completed activities
-                            if snapshot.status == ActivityStatus::Completed {
-                                if skipped < skip_count {
-                                    skipped += 1;
-                                    continue;
-                                }
-
-                                snapshots.push(snapshot);
-                                collected += 1;
-
-                                if collected >= limit {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if collected >= limit {
-                break;
-            }
-
-            cursor = new_cursor;
-            if cursor == 0 {
-                break; // Scan complete
             }
         }
-
-        // Sort by completed_at descending (most recent first)
-        snapshots.sort_by(|a, b| {
-            b.completed_at
-                .unwrap_or(b.created_at)
-                .cmp(&a.completed_at.unwrap_or(a.created_at))
-        });
-
+        
         Ok(snapshots)
     }
 
@@ -404,6 +356,10 @@ impl QueueInspector {
 
     fn scheduled_activities_key(&self) -> String {
         format!("{}:scheduled_activities", self.queue_name)
+    }
+
+    fn completed_activities_key(&self) -> String {
+        format!("{}:completed_activities", self.queue_name)
     }
 
     fn activity_events_key(&self, activity_id: &Uuid) -> String {

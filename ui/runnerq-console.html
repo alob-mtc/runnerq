@@ -1375,16 +1375,6 @@
                 <select class="filter-select" id="filter-type">
                     <option value="">All Activity Types</option>
                 </select>
-                <select class="filter-select" id="filter-status">
-                    <option value="">All Statuses</option>
-                    <option value="Pending">Pending</option>
-                    <option value="Running">Running</option>
-                    <option value="Completed">Completed</option>
-                    <option value="Failed">Failed</option>
-                    <option value="Retrying">Retrying</option>
-                    <option value="Scheduled">Scheduled</option>
-                    <option value="DeadLetter">Dead Letter</option>
-                </select>
                 <button class="clear-filters-btn" id="clear-filters">Clear Filters</button>
                 <div class="limit-group">
                     <span class="limit-label">Show:</span>
@@ -1532,7 +1522,6 @@
         let reconnectTimer = null;
         let searchTerm = '';
         let filterType = '';
-        let filterStatus = '';
         let sortColumn = 'created_at';
         let sortDirection = 'desc';
         let activityLimit = parseInt(localStorage.getItem('runnerq_activity_limit') || '50', 10);
@@ -1553,7 +1542,7 @@
             const container = document.getElementById('error-container');
             container.innerHTML = `
                 <div class="error-banner">
-                    <strong>Error:</strong> ${message}
+                    <strong>Error:</strong> ${escapeHtml(message)}
                     <button class="refresh-btn" onclick="location.reload()">Reload</button>
                 </div>
             `;
@@ -1637,15 +1626,6 @@
                     trendEl.className = 'stats-trend';
                     trendEl.textContent = '';
                 }
-            }
-        };
-
-        const filterByStatus = (status) => {
-            const statusSelect = document.getElementById('filter-status');
-            if (statusSelect) {
-                statusSelect.value = status;
-                filterStatus = status;
-                applyFilters();
             }
         };
 
@@ -1734,11 +1714,6 @@
                     return false;
                 }
                 
-                // Status filter
-                if (filterStatus && activity.status !== filterStatus) {
-                    return false;
-                }
-                
                 return true;
             });
 
@@ -1823,7 +1798,7 @@
                 let emptyMessage = 'No activities found';
                 let emptyIcon = '📭';
                 
-                if (searchTerm || filterType || filterStatus) {
+                if (searchTerm || filterType) {
                     emptyMessage = 'No activities match your filters';
                     emptyIcon = '🔍';
                 } else if (currentCollection === 'completed') {
@@ -1839,7 +1814,7 @@
                         <div class="empty-state-icon">${emptyIcon}</div>
                         <div class="empty-state-title">${emptyMessage}</div>
                         <div class="empty-state-description">
-                            ${searchTerm || filterType || filterStatus 
+                            ${searchTerm || filterType 
                                 ? 'Try adjusting your search or filter criteria' 
                                 : 'Activities will appear here when they are enqueued'}
                         </div>
@@ -1849,8 +1824,7 @@
             }
 
             const rows = data.map(activity => `
-                <tr class="${selectedActivityId === activity.id ? 'selected' : ''} fade-in" 
-                <tr class="${selectedActivityId === activity.id ? 'selected' : ''} fade-in" 
+                <tr class="${selectedActivityId === activity.id ? 'selected' : ''} fade-in"
                     data-activity-id="${escapeHtml(activity.id)}"
                     onclick="selectActivity(this.dataset.activityId)">
                     <td>
@@ -2311,7 +2285,6 @@
             // Setup search and filter listeners
             const searchInput = document.getElementById('search-input');
             const filterTypeSelect = document.getElementById('filter-type');
-            const filterStatusSelect = document.getElementById('filter-status');
             const clearFiltersBtn = document.getElementById('clear-filters');
 
             let searchDebounce = null;
@@ -2328,18 +2301,11 @@
                 applyFilters();
             });
 
-            filterStatusSelect.addEventListener('change', (e) => {
-                filterStatus = e.target.value;
-                applyFilters();
-            });
-
             clearFiltersBtn.addEventListener('click', () => {
                 searchInput.value = '';
                 filterTypeSelect.value = '';
-                filterStatusSelect.value = '';
                 searchTerm = '';
                 filterType = '';
-                filterStatus = '';
                 applyFilters();
             });
 

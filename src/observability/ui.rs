@@ -118,6 +118,8 @@ pub fn observability_api(inspector: QueueInspector) -> Router {
         .route("/stats", get(get_stats))
         .route("/activities/:key", get(activity_collection_or_detail))
         .route("/activities/:id/events", get(activity_events))
+        .route("/activities/:id/result", get(activity_result))
+        .route("/stream", get(event_stream))
         .route("/dead-letter", get(dead_letters))
         .with_state(state)
 }
