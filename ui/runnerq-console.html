@@ -1850,7 +1850,9 @@
 
             const rows = data.map(activity => `
                 <tr class="${selectedActivityId === activity.id ? 'selected' : ''} fade-in" 
-                    onclick="selectActivity('${activity.id}')">
+                <tr class="${selectedActivityId === activity.id ? 'selected' : ''} fade-in" 
+                    data-activity-id="${escapeHtml(activity.id)}"
+                    onclick="selectActivity(this.dataset.activityId)">
                     <td>
                         <div class="activity-type">${escapeHtml(activity.activity_type)}</div>
                         <div class="activity-id">${activity.id}</div>
