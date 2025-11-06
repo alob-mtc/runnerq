@@ -87,7 +87,7 @@ pub enum ActivityPriority {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub(crate) enum ActivityStatus {
+pub enum ActivityStatus {
     /// Activity is queued and waiting to be processed
     Pending,
     /// Activity is currently being executed by a worker

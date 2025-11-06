@@ -1,19 +1,21 @@
 use crate::activity::activity::{
-    ActivityFuture, ActivityHandlerRegistry, ActivityOption, ActivityPriority,
+    Activity, ActivityFuture, ActivityHandler, ActivityHandlerRegistry, ActivityOption,
+    ActivityPriority,
 };
 use crate::config::WorkerConfig;
-use crate::queue::queue::{ActivityQueueTrait, ActivityResult, ResultState};
+use crate::observability::QueueInspector;
+use crate::queue::queue::{
+    ActivityEvent, ActivityQueue, ActivityQueueTrait, ActivityResult, ResultState,
+};
 use crate::runner::error::WorkerError;
 use crate::runner::redis::{create_redis_pool, create_redis_pool_with_config, RedisConfig};
-use crate::{
-    activity::activity::Activity, ActivityContext, ActivityError, ActivityHandler, ActivityQueue,
-};
+use crate::{ActivityContext, ActivityError};
 use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{watch, RwLock, Semaphore};
+use tokio::sync::{broadcast, watch, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -124,12 +126,14 @@ impl Backoff {
 
 pub struct WorkerEngine {
     activity_queue: Arc<dyn ActivityQueueTrait>,
+    queue_core: Arc<ActivityQueue>,
     activity_handlers: ActivityHandlerRegistry, // kept as-is per request
     config: WorkerConfig,
     running: Arc<RwLock<bool>>, // retains external visibility
     shutdown_tx: watch::Sender<bool>,
     cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsSink>,
+    event_tx: Option<broadcast::Sender<ActivityEvent>>,
 }
 
 impl WorkerEngine {
@@ -197,23 +201,58 @@ impl WorkerEngine {
     /// ```
     pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let queue = Arc::new(ActivityQueue::new(
+            redis_pool,
+            config.queue_name.clone(),
+            config.lease_ms.unwrap_or(100),
+        ));
+        let activity_queue: Arc<dyn ActivityQueueTrait> = queue.clone();
         Self {
-            activity_queue: Arc::new(ActivityQueue::new(
-                redis_pool,
-                config.queue_name.clone(),
-                config.lease_ms.unwrap_or(60_000),
-            )),
+            activity_queue,
+            queue_core: queue,
             activity_handlers: ActivityHandlerRegistry::new(),
             config,
             running: Arc::new(RwLock::new(false)),
             shutdown_tx,
             cancel_token: CancellationToken::new(),
             metrics: Arc::new(NoopMetrics),
+            event_tx: None,
         }
     }
 
     pub fn with_metrics(&mut self, sink: Arc<dyn MetricsSink>) {
         self.metrics = sink;
+    }
+
+    pub fn enable_event_stream(&mut self, capacity: usize) -> broadcast::Receiver<ActivityEvent> {
+        let (tx, rx) = broadcast::channel(capacity);
+        self.queue_core.set_event_channel(tx.clone());
+        self.event_tx = Some(tx);
+        rx
+    }
+
+    pub fn subscribe_events(&self) -> Option<broadcast::Receiver<ActivityEvent>> {
+        self.event_tx.as_ref().map(|tx| tx.subscribe())
+    }
+
+    pub fn inspector(&self) -> QueueInspector {
+        let mut inspector = QueueInspector::new(
+            self.queue_core.redis_pool(),
+            self.queue_core.queue_name().to_string(),
+        )
+        .with_max_workers(self.config.max_concurrent_activities);
+
+        // Get existing event channel or create one for the inspector
+        if let Some(tx) = self.queue_core.event_channel() {
+            inspector = inspector.with_event_stream(tx);
+        } else {
+            // Auto-enable event stream for inspector with capacity of 64
+            let (tx, _rx) = tokio::sync::broadcast::channel(64);
+            self.queue_core.set_event_channel(tx.clone());
+            inspector = inspector.with_event_stream(tx);
+        }
+
+        inspector
     }
 
     /// Creates a new WorkerEngineBuilder for fluent configuration.
@@ -472,6 +511,7 @@ impl WorkerEngine {
 
         tokio::spawn(async move {
             debug!(%worker_id, "Starting worker loop");
+            let worker_label = format!("worker-{}", worker_id);
             let mut backoff = Backoff::new(Duration::from_millis(100), Duration::from_secs(5));
 
             while *running.read().await {
@@ -527,6 +567,17 @@ impl WorkerEngine {
                 // Resolve handler
                 let activity_id = activity.id;
                 let activity_type = activity.activity_type.clone();
+                if let Err(e) = activity_queue
+                    .assign_worker(activity_id, worker_label.as_str())
+                    .await
+                {
+                    error!(
+                        %worker_id,
+                        activity_id = %activity_id,
+                        error = %e,
+                        "Failed to assign worker to activity"
+                    );
+                }
                 debug!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Worker processing activity");
 
                 let handler = match activity_handlers.get(&activity.activity_type) {
@@ -534,7 +585,12 @@ impl WorkerEngine {
                     None => {
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "No handler found for activity type");
                         if let Err(e) = activity_queue
-                            .mark_failed(activity, "handler_not_found".to_string(), false)
+                            .mark_failed(
+                                activity,
+                                "handler_not_found".to_string(),
+                                false,
+                                Some(worker_label.as_str()),
+                            )
                             .await
                         {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
@@ -571,7 +627,10 @@ impl WorkerEngine {
                 match timed {
                     Ok(Ok(value)) => {
                         metrics.inc_counter("activity_completed", 1);
-                        if let Err(e) = activity_queue.mark_completed(activity.id).await {
+                        if let Err(e) = activity_queue
+                            .mark_completed(&activity, Some(worker_label.as_str()))
+                            .await
+                        {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as completed");
                         }
                         info!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Activity completed successfully");
@@ -591,7 +650,10 @@ impl WorkerEngine {
                     Ok(Err(ActivityError::Retry(reason))) => {
                         metrics.inc_counter("activity_retry", 1);
                         warn!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity requesting retry");
-                        if let Err(e) = activity_queue.mark_failed(activity, reason, true).await {
+                        if let Err(e) = activity_queue
+                            .mark_failed(activity, reason, true, Some(worker_label.as_str()))
+                            .await
+                        {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity for retry");
                         }
                     }
@@ -599,7 +661,12 @@ impl WorkerEngine {
                         metrics.inc_counter("activity_failed_non_retry", 1);
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity failed");
                         if let Err(e) = activity_queue
-                            .mark_failed(activity, reason.clone(), false)
+                            .mark_failed(
+                                activity,
+                                reason.clone(),
+                                false,
+                                Some(worker_label.as_str()),
+                            )
                             .await
                         {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
@@ -623,7 +690,9 @@ impl WorkerEngine {
                         metrics.inc_counter("activity_timeout", 1);
                         let error_msg = "Activity execution timed out".to_string();
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, timeout = ?activity_timeout, "Activity timed out");
-                        if let Err(e) = activity_queue.mark_failed(activity, error_msg, true).await
+                        if let Err(e) = activity_queue
+                            .mark_failed(activity, error_msg, true, Some(worker_label.as_str()))
+                            .await
                         {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
                         }
@@ -915,6 +984,7 @@ pub struct WorkerEngineBuilder {
     schedule_poll_interval: Option<Duration>,
     redis_config: Option<RedisConfig>,
     metrics: Option<Arc<dyn MetricsSink>>,
+    event_stream_capacity: Option<usize>,
 }
 
 impl WorkerEngineBuilder {
@@ -927,6 +997,7 @@ impl WorkerEngineBuilder {
             schedule_poll_interval: None,
             redis_config: None,
             metrics: None,
+            event_stream_capacity: None,
         }
     }
 
@@ -990,6 +1061,11 @@ impl WorkerEngineBuilder {
         self
     }
 
+    pub fn event_stream(mut self, capacity: usize) -> Self {
+        self.event_stream_capacity = Some(capacity);
+        self
+    }
+
     /// Builds the WorkerEngine with the configured settings.
     ///
     /// # Returns
@@ -1029,6 +1105,10 @@ impl WorkerEngineBuilder {
         // Apply custom metrics if provided
         if let Some(metrics) = self.metrics {
             worker_engine.with_metrics(metrics);
+        }
+
+        if let Some(capacity) = self.event_stream_capacity {
+            worker_engine.enable_event_stream(capacity);
         }
 
         Ok(worker_engine)

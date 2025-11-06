@@ -1,0 +1,2529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RunnerQ Console</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #f3f4f6;
+            --bg-secondary: #ffffff;
+            --bg-dark: #1f2937;
+            --bg-darker: #111827;
+            --border: #e5e7eb;
+            --text-primary: #111827;
+            --text-secondary: #6b7280;
+            --text-light: #f9fafb;
+            --accent-blue: #2563eb;
+            --accent-blue-hover: #1d4ed8;
+            --accent-blue-light: rgba(37, 99, 235, 0.08);
+            --shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+
+        .app-shell {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .app-header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 1.5rem 2rem;
+            background: linear-gradient(135deg, var(--bg-dark) 0%, var(--bg-darker) 100%);
+            color: var(--text-light);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .logo {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, #ff6b35 0%, #f97316 100%);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 24px;
+            color: white;
+        }
+
+        .header-content h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        .subtitle {
+            margin: 0.25rem 0 0;
+            color: rgba(249, 250, 251, 0.8);
+            font-size: 0.9rem;
+        }
+
+        .worker-info {
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 8px;
+            padding: 0.5rem 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .worker-info-label {
+            font-size: 0.85rem;
+            color: rgba(249, 250, 251, 0.7);
+            font-weight: 500;
+        }
+
+        .worker-info-value {
+            font-size: 1rem;
+            color: var(--text-light);
+            font-weight: 700;
+        }
+
+        .app-main {
+            flex: 1;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+            max-width: 1600px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 1rem;
+        }
+
+        .stats-card {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1.25rem;
+            box-shadow: var(--shadow);
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            border-left: 4px solid;
+            transition: all 0.2s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stats-card::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: currentColor;
+            opacity: 0.3;
+        }
+
+        .stats-card.pending { 
+            border-left-color: #0ea5e9;
+            color: #0ea5e9;
+        }
+        .stats-card.processing { 
+            border-left-color: #3b82f6;
+            color: #3b82f6;
+        }
+        .stats-card.critical { 
+            border-left-color: #ef4444;
+            color: #ef4444;
+        }
+        .stats-card.high { 
+            border-left-color: #f97316;
+            color: #f97316;
+        }
+        .stats-card.normal { 
+            border-left-color: #22c55e;
+            color: #22c55e;
+        }
+        .stats-card.low { 
+            border-left-color: #a855f7;
+            color: #a855f7;
+        }
+        .stats-card.scheduled { 
+            border-left-color: #0891b2;
+            color: #0891b2;
+        }
+        .stats-card.dead-letter { 
+            border-left-color: #64748b;
+            color: #64748b;
+        }
+
+        .stats-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .stats-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-weight: 600;
+        }
+
+        .stats-trend {
+            font-size: 0.75rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .stats-card:hover .stats-trend {
+            opacity: 1;
+        }
+
+        .stats-trend.up {
+            color: #10b981;
+        }
+
+        .stats-trend.down {
+            color: #ef4444;
+        }
+
+        .stats-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            line-height: 1;
+        }
+
+        .stats-bar {
+            height: 4px;
+            background: var(--bg-primary);
+            border-radius: 2px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .stats-bar-fill {
+            height: 100%;
+            background: currentColor;
+            border-radius: 2px;
+            transition: width 0.5s ease;
+        }
+
+        /* Priority Stats Section */
+        .priority-stats {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1rem 1.5rem;
+            box-shadow: var(--shadow);
+            display: flex;
+            align-items: center;
+            gap: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .priority-stats-title {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            min-width: 100px;
+        }
+
+        .priority-items {
+            display: flex;
+            gap: 2rem;
+            flex: 1;
+            flex-wrap: wrap;
+        }
+
+        .priority-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .priority-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .priority-dot.critical { background: #ef4444; }
+        .priority-dot.high { background: #f97316; }
+        .priority-dot.normal { background: #22c55e; }
+        .priority-dot.low { background: #a855f7; }
+
+        .priority-item-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .priority-item-value {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            min-width: 30px;
+            text-align: right;
+        }
+
+        /* Content Grid */
+        .content-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 2.5fr) minmax(360px, 1fr);
+            gap: 1.5rem;
+        }
+
+        /* Activities Section */
+        .activities {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            box-shadow: var(--shadow);
+            display: flex;
+            flex-direction: column;
+            max-height: calc(100vh - 280px);
+            overflow: hidden;
+        }
+
+        #activity-table-container {
+            overflow-y: auto;
+            flex: 1;
+            min-height: 0;
+        }
+
+        .section-header {
+            padding: 1.25rem 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .tabs {
+            display: inline-flex;
+            border-radius: 999px;
+            background: var(--bg-primary);
+            padding: 4px;
+            gap: 4px;
+        }
+
+        .tabs button {
+            border: none;
+            background: transparent;
+            padding: 0.5rem 1rem;
+            border-radius: 999px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.9rem;
+        }
+
+        .tabs button.active {
+            background: var(--accent-blue);
+            color: var(--text-light);
+        }
+
+        .tabs button:hover:not(.active) {
+            background: rgba(37, 99, 235, 0.1);
+        }
+
+        .collection-count {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        /* Activity Table */
+        .activity-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .activity-table thead {
+            background: #f9fafb;
+            text-align: left;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+        }
+
+        .activity-table th {
+            padding: 1rem 1.5rem;
+            border-bottom: 2px solid var(--border);
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.2s;
+        }
+
+        .activity-table th:hover {
+            background: #f3f4f6;
+        }
+
+        .activity-table th.sortable {
+            position: relative;
+            padding-right: 2rem;
+        }
+
+        .activity-table th.sortable::after {
+            content: '↕';
+            position: absolute;
+            right: 0.75rem;
+            opacity: 0.3;
+            font-size: 0.9rem;
+        }
+
+        .activity-table th.sortable.sorted-asc::after {
+            content: '↑';
+            opacity: 1;
+            color: var(--accent-blue);
+        }
+
+        .activity-table th.sortable.sorted-desc::after {
+            content: '↓';
+            opacity: 1;
+            color: var(--accent-blue);
+        }
+
+        .activity-table td {
+            padding: 1.2rem 1.5rem;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+
+        .activity-table tbody tr {
+            cursor: pointer;
+            transition: all 0.2s;
+            position: relative;
+        }
+
+        .activity-table tbody tr:hover {
+            background: var(--bg-primary);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.03);
+        }
+
+        .activity-table tbody tr.selected {
+            background: var(--accent-blue-light);
+        }
+
+        .activity-table tbody tr.selected td:first-child {
+            border-left: 3px solid var(--accent-blue);
+        }
+
+        .activity-type {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 0.25rem;
+        }
+
+        .activity-id {
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            word-break: break-all;
+        }
+
+        .priority {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.2rem 0.7rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .priority.Critical {
+            background: rgba(239, 68, 68, 0.15);
+            color: #b91c1c;
+        }
+
+        .priority.High {
+            background: rgba(249, 115, 22, 0.15);
+            color: #c2410c;
+        }
+
+        .priority.Normal {
+            background: rgba(34, 197, 94, 0.15);
+            color: #15803d;
+        }
+
+        .priority.Low {
+            background: rgba(168, 85, 247, 0.15);
+            color: #7e22ce;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.35rem 0.85rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            text-transform: capitalize;
+        }
+
+        /* Temporal-style status colors */
+        .status-badge.Running { 
+            background: rgba(59, 130, 246, 0.15); 
+            color: #1e40af;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+        .status-badge.Pending { 
+            background: rgba(156, 163, 175, 0.15); 
+            color: #4b5563;
+            border: 1px solid rgba(156, 163, 175, 0.3);
+        }
+        .status-badge.Completed { 
+            background: rgba(16, 185, 129, 0.15); 
+            color: #047857;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+        .status-badge.Failed { 
+            background: rgba(239, 68, 68, 0.15); 
+            color: #b91c1c;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+        .status-badge.Retrying { 
+            background: rgba(245, 158, 11, 0.15); 
+            color: #b45309;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+        .status-badge.DeadLetter { 
+            background: rgba(107, 114, 128, 0.15); 
+            color: #374151;
+            border: 1px solid rgba(107, 114, 128, 0.3);
+        }
+        .status-badge.Scheduled { 
+            background: rgba(139, 92, 246, 0.15); 
+            color: #6d28d9;
+            border: 1px solid rgba(139, 92, 246, 0.3);
+        }
+        .status-badge.Enqueued {
+            background: rgba(156, 163, 175, 0.15); 
+            color: #4b5563;
+            border: 1px solid rgba(156, 163, 175, 0.3);
+        }
+        .status-badge.Started {
+            background: rgba(59, 130, 246, 0.15); 
+            color: #1e40af;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+        .status-badge.Dequeued {
+            background: rgba(59, 130, 246, 0.15); 
+            color: #1e40af;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+
+        /* Detail Panel */
+        .detail-panel {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            box-shadow: var(--shadow);
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            max-height: calc(100vh - 240px);
+            overflow-y: auto;
+            position: sticky;
+            top: 2rem;
+        }
+
+        .detail-panel.empty {
+            align-items: center;
+            justify-content: center;
+            color: var(--text-secondary);
+            font-style: italic;
+            min-height: 300px;
+        }
+
+        .detail-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 1rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .detail-header h2 {
+            font-size: 1.25rem;
+            font-weight: 700;
+        }
+
+        .close-btn {
+            background: var(--bg-primary);
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            color: var(--text-primary);
+            transition: background 0.2s;
+        }
+
+        .close-btn:hover {
+            background: var(--border);
+        }
+
+        .detail-section {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .detail-section h3 {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1rem;
+        }
+
+        .detail-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .detail-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            letter-spacing: 0.05em;
+            font-weight: 600;
+        }
+
+        .detail-value {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .metadata-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .metadata-item {
+            background: var(--bg-primary);
+            padding: 0.75rem;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            font-size: 0.85rem;
+        }
+
+        .metadata-key {
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        .metadata-value {
+            font-family: 'Monaco', 'Courier New', monospace;
+            color: var(--text-primary);
+        }
+
+        /* Timeline View Toggle */
+        .timeline-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .view-toggle {
+            display: inline-flex;
+            border-radius: 8px;
+            background: var(--bg-primary);
+            padding: 4px;
+            gap: 4px;
+        }
+
+        .view-toggle button {
+            border: none;
+            background: transparent;
+            padding: 0.4rem 0.8rem;
+            border-radius: 6px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.8rem;
+        }
+
+        .view-toggle button.active {
+            background: var(--accent-blue);
+            color: white;
+        }
+
+        .view-toggle button:hover:not(.active) {
+            background: rgba(37, 99, 235, 0.1);
+        }
+
+        /* Timeline Styles */
+        .timeline {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .timeline-item {
+            position: relative;
+            padding: 1rem;
+            background: var(--bg-primary);
+            border-radius: 8px;
+            border-left: 4px solid;
+            transition: all 0.2s;
+        }
+
+        .timeline-item:hover {
+            background: rgba(37, 99, 235, 0.05);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+        }
+
+        /* Event-specific colors */
+        .timeline-item.Enqueued { border-left-color: #9ca3af; }
+        .timeline-item.Dequeued { border-left-color: #3b82f6; }
+        .timeline-item.Started { border-left-color: #3b82f6; }
+        .timeline-item.Running { border-left-color: #3b82f6; }
+        .timeline-item.Completed { border-left-color: #10b981; }
+        .timeline-item.Failed { border-left-color: #ef4444; }
+        .timeline-item.Retrying { border-left-color: #f59e0b; }
+        .timeline-item.Scheduled { border-left-color: #8b5cf6; }
+        .timeline-item.LeaseExtended { border-left-color: #06b6d4; }
+        .timeline-item.DeadLetter { border-left-color: #6b7280; }
+
+        .timeline-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .timeline-type {
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .timeline-type::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        .timeline-time {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            font-family: 'Monaco', 'Courier New', monospace;
+        }
+
+        .timeline-worker {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-top: 0.25rem;
+        }
+
+        .timeline-detail {
+            background: var(--bg-darker);
+            color: var(--text-light);
+            padding: 0.75rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-family: 'Monaco', 'Courier New', monospace;
+            overflow-x: auto;
+            margin-top: 0.5rem;
+        }
+
+        /* Visual Timeline (horizontal bars) */
+        .timeline-visual {
+            position: relative;
+            padding: 2rem 0;
+            overflow-x: auto;
+        }
+
+        .timeline-bar-container {
+            position: relative;
+            min-height: 60px;
+            margin-bottom: 1rem;
+        }
+
+        .timeline-bar {
+            position: relative;
+            height: 32px;
+            background: linear-gradient(90deg, rgba(59, 130, 246, 0.8), rgba(139, 92, 246, 0.8));
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            padding: 0 0.75rem;
+            color: white;
+            font-size: 0.8rem;
+            font-weight: 600;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+
+        .timeline-bar:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+        }
+
+        .timeline-bar.completed {
+            background: linear-gradient(90deg, #10b981, #059669);
+        }
+
+        .timeline-bar.failed {
+            background: linear-gradient(90deg, #ef4444, #dc2626);
+        }
+
+        .timeline-bar.running {
+            background: linear-gradient(90deg, #3b82f6, #2563eb);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .timeline-bar.retrying {
+            background: linear-gradient(90deg, #f59e0b, #d97706);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.8; }
+        }
+
+        .timeline-markers {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        .timeline-marker {
+            position: absolute;
+            width: 2px;
+            height: 100%;
+            background: var(--border);
+        }
+
+        .timeline-marker-label {
+            position: absolute;
+            top: -20px;
+            left: -30px;
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .error-section {
+            background: rgba(239, 68, 68, 0.08);
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            padding: 1rem;
+            border-radius: 12px;
+        }
+
+        .error-section h3 {
+            color: #991b1b;
+            margin-bottom: 0.5rem;
+        }
+
+        .error-message {
+            color: #991b1b;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.85rem;
+        }
+
+        .error-time {
+            color: #6b7280;
+            font-size: 0.8rem;
+            margin-top: 0.5rem;
+        }
+
+        /* Input/Results Display */
+        .data-display {
+            background: var(--bg-darker);
+            color: var(--text-light);
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+            max-height: 400px;
+            overflow-y: auto;
+            position: relative;
+        }
+
+        .section-header-with-action {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.75rem;
+        }
+
+        .copy-btn {
+            background: var(--accent-blue);
+            color: white;
+            border: none;
+            padding: 0.4rem 0.8rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .copy-btn:hover {
+            background: var(--accent-blue-hover);
+        }
+
+        .copy-btn.copied {
+            background: #10b981;
+        }
+
+        .empty-data {
+            color: var(--text-secondary);
+            font-style: italic;
+            text-align: center;
+            padding: 2rem;
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            border: 3px solid var(--border);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .empty-state {
+            padding: 3rem 2rem;
+            text-align: center;
+            color: var(--text-secondary);
+        }
+
+        .refresh-btn {
+            background: var(--accent-blue);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background: var(--accent-blue-hover);
+        }
+
+        .error-banner {
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 1rem 1.5rem;
+            border-radius: 12px;
+            margin-bottom: 1rem;
+        }
+
+        /* Search Bar */
+        .search-container {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1.25rem 1.5rem;
+            box-shadow: var(--shadow);
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .limit-group {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+            margin-left: auto;
+        }
+
+        .limit-label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .limit-custom-input {
+            width: 80px;
+            padding: 0.5rem 0.75rem;
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            font-family: inherit;
+            transition: border-color 0.2s;
+            display: none;
+        }
+
+        .limit-custom-input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .limit-custom-input.visible {
+            display: block;
+        }
+
+        .search-input {
+            flex: 1;
+            min-width: 250px;
+            padding: 0.65rem 1rem;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-family: inherit;
+            transition: border-color 0.2s;
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+
+        .filter-select {
+            padding: 0.65rem 1rem;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-family: inherit;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+
+        .filter-select:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+
+        .clear-filters-btn {
+            padding: 0.65rem 1.25rem;
+            border: none;
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .clear-filters-btn:hover {
+            background: var(--border);
+            color: var(--text-primary);
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes slideIn {
+            from { transform: translateX(100%); }
+            to { transform: translateX(0); }
+        }
+
+        @keyframes shimmer {
+            0% { background-position: -1000px 0; }
+            100% { background-position: 1000px 0; }
+        }
+
+        .fade-in {
+            animation: fadeIn 0.3s ease;
+        }
+
+        .slide-in {
+            animation: slideIn 0.3s ease;
+        }
+
+        /* Loading States */
+        .skeleton {
+            background: linear-gradient(90deg, #f3f4f6 25%, #e5e7eb 50%, #f3f4f6 75%);
+            background-size: 2000px 100%;
+            animation: shimmer 2s infinite;
+            border-radius: 4px;
+        }
+
+        .skeleton-text {
+            height: 1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .skeleton-card {
+            height: 100px;
+            border-radius: 12px;
+        }
+
+        /* Empty States */
+        .empty-state {
+            padding: 4rem 2rem;
+            text-align: center;
+            color: var(--text-secondary);
+        }
+
+        .empty-state-icon {
+            font-size: 3rem;
+            opacity: 0.3;
+            margin-bottom: 1rem;
+        }
+
+        .empty-state-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 0.5rem;
+        }
+
+        .empty-state-description {
+            font-size: 0.9rem;
+            max-width: 400px;
+            margin: 0 auto;
+        }
+
+        /* Connection Status Indicator */
+        .connection-status {
+            position: fixed;
+            bottom: 1rem;
+            right: 1rem;
+            padding: 0.5rem 1rem;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            z-index: 1000;
+            transition: all 0.3s;
+        }
+
+        .connection-status.connected {
+            background: #10b981;
+            color: white;
+        }
+
+        .connection-status.disconnected {
+            background: #ef4444;
+            color: white;
+        }
+
+        .connection-status.connecting {
+            background: #f59e0b;
+            color: white;
+        }
+
+        .connection-status::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        /* Responsive Design */
+        @media (max-width: 1200px) {
+            .content-grid {
+                grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
+            }
+
+            .detail-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 1024px) {
+            .app-main {
+                padding: 1.5rem;
+            }
+
+            .content-grid {
+                grid-template-columns: 1fr;
+                gap: 1rem;
+            }
+
+            .detail-panel {
+                position: static;
+                max-height: none;
+                max-height: 600px;
+                overflow-y: auto;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+                gap: 0.75rem;
+            }
+
+            .priority-stats {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .priority-items {
+                width: 100%;
+            }
+
+            .search-container {
+                flex-direction: column;
+                align-items: stretch;
+                padding: 1rem;
+            }
+
+            .search-input,
+            .filter-select {
+                width: 100%;
+            }
+
+            .limit-group {
+                width: 100%;
+                margin-left: 0;
+            }
+
+            .activity-table th,
+            .activity-table td {
+                padding: 0.75rem 1rem;
+                font-size: 0.85rem;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .app-main {
+                padding: 1rem;
+                gap: 1rem;
+            }
+
+            .app-header {
+                padding: 1rem;
+            }
+
+            .activities {
+                max-height: calc(100vh - 320px);
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            }
+
+            .stats-value {
+                font-size: 1.5rem;
+            }
+
+            .tabs {
+                width: 100%;
+                justify-content: space-between;
+            }
+
+            .tabs {
+                width: 100%;
+            }
+
+            .tabs button {
+                flex: 1;
+                font-size: 0.75rem;
+                padding: 0.4rem 0.5rem;
+            }
+
+            .section-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 0.75rem;
+            }
+
+            .activity-table th:last-child,
+            .activity-table td:last-child {
+                display: none;
+            }
+
+            .detail-panel {
+                padding: 1rem;
+                max-height: 500px;
+            }
+
+            .detail-grid {
+                gap: 0.75rem;
+            }
+
+            .timeline-bar {
+                font-size: 0.7rem;
+                padding: 0 0.5rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .app-header h1 {
+                font-size: 1.25rem;
+            }
+
+            .subtitle {
+                font-size: 0.8rem;
+            }
+
+            .worker-info {
+                font-size: 0.85rem;
+                padding: 0.4rem 0.75rem;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .search-container {
+                gap: 0.75rem;
+            }
+
+            .limit-group {
+                flex-wrap: wrap;
+            }
+
+            .limit-custom-input {
+                width: 100%;
+            }
+
+            .activities {
+                max-height: calc(100vh - 360px);
+            }
+
+            .activity-id {
+                font-size: 0.7rem;
+                word-break: break-all;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-shell">
+        <header class="app-header">
+            <div class="logo">R</div>
+            <div class="header-content">
+                <h1>RunnerQ Console</h1>
+                <p class="subtitle">Operational visibility for the RunnerQ worker fleet</p>
+            </div>
+            <div class="worker-info" id="worker-info" style="display: none;">
+                <span class="worker-info-label">Workers:</span>
+                <span class="worker-info-value" id="worker-count">-</span>
+            </div>
+        </header>
+
+        <main class="app-main">
+            <div id="error-container"></div>
+            
+            <!-- Search and Filters -->
+            <div class="search-container">
+                <input 
+                    type="text" 
+                    class="search-input" 
+                    id="search-input" 
+                    placeholder="🔍 Search by Activity ID or Type..."
+                >
+                <select class="filter-select" id="filter-type">
+                    <option value="">All Activity Types</option>
+                </select>
+                <button class="clear-filters-btn" id="clear-filters">Clear Filters</button>
+                <div class="limit-group">
+                    <span class="limit-label">Show:</span>
+                    <select class="filter-select" id="limit-select" style="width: auto; min-width: 100px;">
+                        <option value="10">10</option>
+                        <option value="50" selected>50</option>
+                        <option value="100">100</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                    <input 
+                        type="number" 
+                        class="limit-custom-input" 
+                        id="limit-custom-input" 
+                        placeholder="Enter limit"
+                        min="1"
+                        max="1000"
+                    >
+                </div>
+            </div>
+            
+            <!-- Stats Overview -->
+            <div class="stats-grid" id="stats-grid">
+                <div class="stats-card pending">
+                    <div class="stats-header">
+                    <span class="stats-label">Pending</span>
+                        <span class="stats-trend" id="trend-pending"></span>
+                    </div>
+                    <span class="stats-value" id="stat-pending">-</span>
+                    <div class="stats-bar">
+                        <div class="stats-bar-fill" id="bar-pending" style="width: 0%"></div>
+                </div>
+                </div>
+                <div class="stats-card processing">
+                    <div class="stats-header">
+                        <span class="stats-label">Processing</span>
+                        <span class="stats-trend" id="trend-processing"></span>
+                </div>
+                    <span class="stats-value" id="stat-processing">-</span>
+                    <div class="stats-bar">
+                        <div class="stats-bar-fill" id="bar-processing" style="width: 0%"></div>
+                </div>
+                </div>
+                <div class="stats-card scheduled">
+                    <div class="stats-header">
+                    <span class="stats-label">Scheduled</span>
+                        <span class="stats-trend" id="trend-scheduled"></span>
+                    </div>
+                    <span class="stats-value" id="stat-scheduled">-</span>
+                    <div class="stats-bar">
+                        <div class="stats-bar-fill" id="bar-scheduled" style="width: 0%"></div>
+                    </div>
+                </div>
+                <div class="stats-card dead-letter">
+                    <div class="stats-header">
+                    <span class="stats-label">Dead Letter</span>
+                        <span class="stats-trend" id="trend-dead-letter"></span>
+                    </div>
+                    <span class="stats-value" id="stat-dead-letter">-</span>
+                    <div class="stats-bar">
+                        <div class="stats-bar-fill" id="bar-dead-letter" style="width: 0%"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Priority Distribution -->
+            <div class="priority-stats">
+                <div class="priority-stats-title">Priority Distribution</div>
+                <div class="priority-items">
+                    <div class="priority-item">
+                        <div class="priority-dot critical"></div>
+                        <span class="priority-item-label">Critical</span>
+                        <span class="priority-item-value" id="stat-critical">-</span>
+                    </div>
+                    <div class="priority-item">
+                        <div class="priority-dot high"></div>
+                        <span class="priority-item-label">High</span>
+                        <span class="priority-item-value" id="stat-high">-</span>
+                    </div>
+                    <div class="priority-item">
+                        <div class="priority-dot normal"></div>
+                        <span class="priority-item-label">Normal</span>
+                        <span class="priority-item-value" id="stat-normal">-</span>
+                    </div>
+                    <div class="priority-item">
+                        <div class="priority-dot low"></div>
+                        <span class="priority-item-label">Low</span>
+                        <span class="priority-item-value" id="stat-low">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Content Grid -->
+            <div class="content-grid">
+                <!-- Activities Table -->
+                <section class="activities">
+                    <div class="section-header">
+                    <nav class="tabs">
+                        <button class="active" data-collection="processing">Processing</button>
+                        <button data-collection="pending">Pending</button>
+                        <button data-collection="completed">Completed</button>
+                        <button data-collection="scheduled">Scheduled</button>
+                        <button data-collection="dead_letter">Dead Letter</button>
+                    </nav>
+                        <span class="collection-count" id="collection-count">0 items</span>
+                    </div>
+                    
+                    <div id="activity-table-container">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Activity Detail Panel -->
+                <aside class="detail-panel empty" id="detail-panel">
+                    <p>Select an activity to inspect its details</p>
+                </aside>
+            </div>
+        </main>
+
+        <!-- Connection Status Indicator -->
+        <div id="connection-status" class="connection-status connecting">
+            Connecting...
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        // Auto-detect the API base relative to the current page
+        const getApiBase = () => {
+            if (window.RUNNERQ_API_BASE) return window.RUNNERQ_API_BASE;
+            // Get the current path and construct relative API path
+            const currentPath = window.location.pathname.replace(/\/$/, '');
+            return `${currentPath}/api/observability`;
+        };
+        const API_BASE = getApiBase();
+
+        // State
+        let currentCollection = 'processing';
+        let selectedActivityId = null;
+        let activities = [];
+        let filteredActivities = [];
+        let allActivityTypes = new Set();
+        let eventSource = null;
+        let reconnectTimer = null;
+        let searchTerm = '';
+        let filterType = '';
+        let sortColumn = 'created_at';
+        let sortDirection = 'desc';
+        let activityLimit = parseInt(localStorage.getItem('runnerq_activity_limit') || '50', 10);
+
+        // Utility Functions
+        const formatDate = (isoString) => {
+            if (!isoString) return '—';
+            return new Date(isoString).toLocaleString();
+        };
+
+        const fetchJSON = async (url) => {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.json();
+        };
+
+        const showError = (message) => {
+            const container = document.getElementById('error-container');
+            container.innerHTML = `
+                <div class="error-banner">
+                    <strong>Error:</strong> ${escapeHtml(message)}
+                    <button class="refresh-btn" onclick="location.reload()">Reload</button>
+                </div>
+            `;
+        };
+
+        // Data Fetching
+        let previousStats = {};
+        
+        const loadStats = async () => {
+            try {
+                const stats = await fetchJSON(`${API_BASE}/stats`);
+                // Priority counts are part of pending_activities, not separate
+                const totalActivities = stats.pending_activities + stats.processing_activities + 
+                                       stats.scheduled_activities + stats.dead_letter_activities;
+                
+                updateStatCard('pending', stats.pending_activities || 0, totalActivities);
+                updateStatCard('processing', stats.processing_activities || 0, totalActivities);
+                updateStatCard('scheduled', stats.scheduled_activities || 0, totalActivities);
+                updateStatCard('dead-letter', stats.dead_letter_activities || 0, totalActivities);
+                
+                // Update priority distribution (no bars/trends for these)
+                updatePriorityItem('critical', stats.critical_priority || 0);
+                updatePriorityItem('high', stats.high_priority || 0);
+                updatePriorityItem('normal', stats.normal_priority || 0);
+                updatePriorityItem('low', stats.low_priority || 0);
+                
+                // Update worker count if available
+                if (stats.max_workers !== undefined && stats.max_workers !== null) {
+                    const workerInfo = document.getElementById('worker-info');
+                    const workerCount = document.getElementById('worker-count');
+                    if (workerInfo && workerCount) {
+                        workerCount.textContent = stats.max_workers;
+                        workerInfo.style.display = 'flex';
+                    }
+                }
+                
+                previousStats = stats;
+            } catch (error) {
+                console.error('Failed to load stats:', error);
+                showError('Failed to load queue statistics');
+            }
+        };
+
+        const updatePriorityItem = (id, value) => {
+            const valueEl = document.getElementById(`stat-${id}`);
+            if (valueEl) {
+                valueEl.textContent = value;
+            }
+        };
+
+        const updateStatCard = (id, value, total) => {
+            const valueEl = document.getElementById(`stat-${id}`);
+            
+            if (!valueEl) return;
+            
+            // Update value
+            valueEl.textContent = value;
+            
+            // Only update bars and trends for main cards (not priority items)
+            const barEl = document.getElementById(`bar-${id}`);
+            const trendEl = document.getElementById(`trend-${id}`);
+            
+            // Update progress bar (percentage of total)
+            if (barEl && total > 0) {
+                const percentage = Math.min((value / total) * 100, 100);
+                barEl.style.width = `${percentage}%`;
+            }
+            
+            // Update trend (if we have previous data)
+            if (trendEl && previousStats[id] !== undefined) {
+                const prev = previousStats[id] || 0;
+                const diff = value - prev;
+                
+                if (diff > 0) {
+                    trendEl.className = 'stats-trend up';
+                    trendEl.textContent = `↑ ${diff}`;
+                } else if (diff < 0) {
+                    trendEl.className = 'stats-trend down';
+                    trendEl.textContent = `↓ ${Math.abs(diff)}`;
+                } else {
+                    trendEl.className = 'stats-trend';
+                    trendEl.textContent = '';
+                }
+            }
+        };
+
+        const filterByPriority = (priority) => {
+            // For priority, we need to switch to the right collection and search
+            switchCollection('pending');
+            // Note: We don't have a priority filter in the UI, but we can use search
+            const searchInput = document.getElementById('search-input');
+            if (searchInput) {
+                searchInput.value = '';
+                searchTerm = '';
+            }
+            // Apply filters to refresh
+            setTimeout(() => applyFilters(), 100);
+        };
+
+        const showLoadingSkeleton = () => {
+            const container = document.getElementById('activity-table-container');
+            container.innerHTML = `
+                <div style="padding: 2rem;">
+                    <div class="skeleton skeleton-card" style="margin-bottom: 1rem;"></div>
+                    <div class="skeleton skeleton-card" style="margin-bottom: 1rem;"></div>
+                    <div class="skeleton skeleton-card"></div>
+                </div>
+            `;
+        };
+
+        const loadActivities = async (collection) => {
+            try {
+                showLoadingSkeleton();
+                
+                const data = await fetchJSON(`${API_BASE}/activities/${collection}?limit=${activityLimit}`);
+                activities = data;
+                
+                // Update activity types for filter dropdown
+                data.forEach(activity => allActivityTypes.add(activity.activity_type));
+                updateActivityTypeFilter();
+                
+                // Apply filters
+                applyFilters();
+                
+            } catch (error) {
+                console.error('Failed to load activities:', error);
+                document.getElementById('activity-table-container').innerHTML = `
+                    <div class="empty-state fade-in">
+                        <div class="empty-state-icon">⚠️</div>
+                        <div class="empty-state-title">Failed to load activities</div>
+                        <div class="empty-state-description">
+                            ${error.message || 'An error occurred while loading activities'}
+                        </div>
+                    </div>
+                `;
+            }
+        };
+
+        const updateActivityTypeFilter = () => {
+            const typeFilter = document.getElementById('filter-type');
+            const currentValue = typeFilter.value;
+            
+            typeFilter.innerHTML = '<option value="">All Activity Types</option>';
+            Array.from(allActivityTypes).sort().forEach(type => {
+                const option = document.createElement('option');
+                option.value = type;
+                option.textContent = type;
+                typeFilter.appendChild(option);
+            });
+            
+            // Restore selection if it still exists
+            if (currentValue && allActivityTypes.has(currentValue)) {
+                typeFilter.value = currentValue;
+            }
+        };
+
+        const applyFilters = () => {
+            filteredActivities = activities.filter(activity => {
+                // Search term filter
+                if (searchTerm) {
+                    const term = searchTerm.toLowerCase();
+                    const matchesId = activity.id.toLowerCase().includes(term);
+                    const matchesType = activity.activity_type.toLowerCase().includes(term);
+                    if (!matchesId && !matchesType) return false;
+                }
+                
+                // Type filter
+                if (filterType && activity.activity_type !== filterType) {
+                    return false;
+                }
+                
+                return true;
+            });
+
+            // Apply sorting
+            applySorting();
+            
+            renderActivityTable(filteredActivities);
+                
+                // Update count
+                document.getElementById('collection-count').textContent = 
+                `${filteredActivities.length} of ${activities.length} item${activities.length !== 1 ? 's' : ''}`;
+
+                // Auto-select first activity if none selected
+            if (filteredActivities.length > 0 && !selectedActivityId) {
+                selectActivity(filteredActivities[0].id);
+            } else if (filteredActivities.length === 0) {
+                clearDetailPanel();
+            } else if (selectedActivityId && !filteredActivities.find(a => a.id === selectedActivityId)) {
+                // Selected activity no longer in filtered list
+                    clearDetailPanel();
+                }
+        };
+
+        const applySorting = () => {
+            filteredActivities.sort((a, b) => {
+                let aVal, bVal;
+
+                switch (sortColumn) {
+                    case 'activity_type':
+                        aVal = a.activity_type || '';
+                        bVal = b.activity_type || '';
+                        break;
+                    case 'priority':
+                        const priorityOrder = { Critical: 0, High: 1, Normal: 2, Low: 3 };
+                        aVal = priorityOrder[a.priority] ?? 999;
+                        bVal = priorityOrder[b.priority] ?? 999;
+                        break;
+                    case 'status':
+                        aVal = a.status || '';
+                        bVal = b.status || '';
+                        break;
+                    case 'created_at':
+                    default:
+                        aVal = new Date(a.created_at || 0);
+                        bVal = new Date(b.created_at || 0);
+                }
+
+                if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1;
+                if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1;
+                return 0;
+            });
+        };
+
+        const sortBy = (column) => {
+            if (sortColumn === column) {
+                sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                sortColumn = column;
+                sortDirection = 'asc';
+            }
+            applyFilters();
+        };
+
+        const loadActivityDetail = async (activityId) => {
+            try {
+                const [activity, events, result] = await Promise.all([
+                    fetchJSON(`${API_BASE}/activities/${activityId}`),
+                    fetchJSON(`${API_BASE}/activities/${activityId}/events?limit=30`),
+                    fetchJSON(`${API_BASE}/activities/${activityId}/result`).catch(() => null)
+                ]);
+                renderDetailPanel(activity, events, result);
+            } catch (error) {
+                console.error('Failed to load activity detail:', error);
+            }
+        };
+
+        // Rendering Functions
+        const renderActivityTable = (data) => {
+            const container = document.getElementById('activity-table-container');
+            
+            if (data.length === 0) {
+                let emptyMessage = 'No activities found';
+                let emptyIcon = '📭';
+                
+                if (searchTerm || filterType) {
+                    emptyMessage = 'No activities match your filters';
+                    emptyIcon = '🔍';
+                } else if (currentCollection === 'completed') {
+                    emptyMessage = 'No completed activities found';
+                    emptyIcon = '✅';
+                } else if (currentCollection === 'dead_letter') {
+                    emptyMessage = 'No activities in dead letter queue';
+                    emptyIcon = '✨';
+                }
+                
+                container.innerHTML = `
+                    <div class="empty-state fade-in">
+                        <div class="empty-state-icon">${emptyIcon}</div>
+                        <div class="empty-state-title">${emptyMessage}</div>
+                        <div class="empty-state-description">
+                            ${searchTerm || filterType 
+                                ? 'Try adjusting your search or filter criteria' 
+                                : 'Activities will appear here when they are enqueued'}
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            const rows = data.map(activity => `
+                <tr class="${selectedActivityId === activity.id ? 'selected' : ''} fade-in"
+                    data-activity-id="${escapeHtml(activity.id)}"
+                    onclick="selectActivity(this.dataset.activityId)">
+                    <td>
+                        <div class="activity-type">${escapeHtml(activity.activity_type)}</div>
+                        <div class="activity-id">${activity.id}</div>
+                    </td>
+                    <td>
+                        <span class="priority ${activity.priority}">${activity.priority}</span>
+                    </td>
+                    <td>
+                        <span class="status-badge ${activity.status}">${activity.status}</span>
+                    </td>
+                    <td>${formatDate(activity.created_at)}</td>
+                    <td>${activity.current_worker_id || activity.last_worker_id || '—'}</td>
+                </tr>
+            `).join('');
+
+            container.innerHTML = `
+                <table class="activity-table">
+                    <thead>
+                        <tr>
+                            <th class="sortable ${sortColumn === 'activity_type' ? 'sorted-' + sortDirection : ''}" onclick="sortBy('activity_type')">
+                                Activity
+                            </th>
+                            <th class="sortable ${sortColumn === 'priority' ? 'sorted-' + sortDirection : ''}" onclick="sortBy('priority')">
+                                Priority
+                            </th>
+                            <th class="sortable ${sortColumn === 'status' ? 'sorted-' + sortDirection : ''}" onclick="sortBy('status')">
+                                Status
+                            </th>
+                            <th class="sortable ${sortColumn === 'created_at' ? 'sorted-' + sortDirection : ''}" onclick="sortBy('created_at')">
+                                Created
+                            </th>
+                            <th>Worker</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows}
+                    </tbody>
+                </table>
+            `;
+        };
+
+        const renderDetailPanel = (activity, events, result) => {
+            const panel = document.getElementById('detail-panel');
+            panel.className = 'detail-panel slide-in';
+
+            // Input display
+            // Input section - create DOM elements safely
+            const inputData = activity.input || activity.payload || null;
+            const createInputSection = () => {
+                const section = document.createElement('div');
+                if (inputData) {
+                    const header = document.createElement('div');
+                    header.className = 'section-header-with-action';
+                    
+                    const h3 = document.createElement('h3');
+                    h3.textContent = 'Input';
+                    
+                    const copyBtn = document.createElement('button');
+                    copyBtn.className = 'copy-btn';
+                    copyBtn.textContent = '📋 Copy';
+                    copyBtn.onclick = function() { copyToClipboard('input-' + activity.id, this); };
+                    
+                    header.appendChild(h3);
+                    header.appendChild(copyBtn);
+                    
+                    const pre = document.createElement('pre');
+                    pre.className = 'data-display';
+                    pre.id = 'input-' + activity.id;
+                    pre.textContent = JSON.stringify(inputData, null, 2);
+                    
+                    section.appendChild(header);
+                    section.appendChild(pre);
+                } else {
+                    const h3 = document.createElement('h3');
+                    h3.textContent = 'Input';
+                    const emptyDiv = document.createElement('div');
+                    emptyDiv.className = 'empty-data';
+                    emptyDiv.textContent = 'No input data';
+                    section.appendChild(h3);
+                    section.appendChild(emptyDiv);
+                }
+                return section;
+            };
+
+            // Results section - create DOM elements safely
+            const resultData = result?.data || activity.result || activity.output || null;
+            const createResultSection = () => {
+                const section = document.createElement('div');
+                if (resultData) {
+                    const header = document.createElement('div');
+                    header.className = 'section-header-with-action';
+                    
+                    const h3 = document.createElement('h3');
+                    h3.textContent = 'Results';
+                    
+                    const copyBtn = document.createElement('button');
+                    copyBtn.className = 'copy-btn';
+                    copyBtn.textContent = '📋 Copy';
+                    copyBtn.onclick = function() { copyToClipboard('result-' + activity.id, this); };
+                    
+                    header.appendChild(h3);
+                    header.appendChild(copyBtn);
+                    
+                    const pre = document.createElement('pre');
+                    pre.className = 'data-display';
+                    pre.id = 'result-' + activity.id;
+                    pre.textContent = JSON.stringify(resultData, null, 2);
+                    
+                    section.appendChild(header);
+                    section.appendChild(pre);
+                } else {
+                    const h3 = document.createElement('h3');
+                    h3.textContent = 'Results';
+                    const emptyDiv = document.createElement('div');
+                    emptyDiv.className = 'empty-data';
+                    emptyDiv.textContent = 'No results yet';
+                    section.appendChild(h3);
+                    section.appendChild(emptyDiv);
+                }
+                return section;
+            };
+
+            const metadataHtml = Object.keys(activity.metadata || {}).length > 0
+                ? `<ul class="metadata-list">
+                    ${Object.entries(activity.metadata).map(([key, value]) => `
+                        <li class="metadata-item">
+                            <span class="metadata-key">${escapeHtml(key)}</span>
+                            <span class="metadata-value">${escapeHtml(value)}</span>
+                        </li>
+                    `).join('')}
+                   </ul>`
+                : '<p style="color: var(--text-secondary)">No metadata</p>';
+
+            // Build timeline HTML with view toggle
+            const eventsHtml = events && events.length > 0
+                ? `<div class="timeline-controls">
+                    <div class="view-toggle">
+                        <button onclick="setTimelineView('${activity.id}', 'compact')" class="timeline-view-btn active" data-view="compact">Compact</button>
+                        <button onclick="setTimelineView('${activity.id}', 'visual')" class="timeline-view-btn" data-view="visual">Timeline</button>
+                        <button onclick="setTimelineView('${activity.id}', 'detailed')" class="timeline-view-btn" data-view="detailed">Detailed</button>
+                            </div>
+                   </div>
+                   <div id="timeline-${activity.id}">
+                    ${renderTimelineView(events, 'compact')}
+                   </div>`
+                : '<p style="color: var(--text-secondary)">No events recorded</p>';
+
+            const errorHtml = activity.last_error
+                ? `<div class="error-section">
+                    <h3>Last Error</h3>
+                    <div class="error-message">${escapeHtml(activity.last_error)}</div>
+                    <div class="error-time">${formatDate(activity.last_error_at)}</div>
+                   </div>`
+                : '';
+
+            // Calculate duration if available
+            let duration = '—';
+            if (activity.started_at && activity.completed_at) {
+                const start = new Date(activity.started_at);
+                const end = new Date(activity.completed_at);
+                const ms = end - start;
+                const seconds = Math.floor(ms / 1000);
+                const milliseconds = ms % 1000;
+                duration = `${seconds}s ${milliseconds}ms`;
+            } else if (activity.started_at) {
+                const start = new Date(activity.started_at);
+                const now = new Date();
+                const ms = now - start;
+                const seconds = Math.floor(ms / 1000);
+                duration = `${seconds}s (running)`;
+            }
+
+            panel.innerHTML = `
+                <div class="detail-header">
+                    <div>
+                        <h2>${escapeHtml(activity.activity_type)}</h2>
+                        <div class="activity-id">${activity.id}</div>
+                    </div>
+                    <button class="close-btn" onclick="clearDetailPanel()">✕</button>
+                </div>
+
+                <div class="detail-section">
+                    <h3>Overview</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <span class="detail-label">Status</span>
+                            <span class="detail-value">
+                                <span class="status-badge ${activity.status}">${activity.status}</span>
+                            </span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Priority</span>
+                            <span class="detail-value">
+                                <span class="priority ${activity.priority}">${activity.priority}</span>
+                            </span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Duration</span>
+                            <span class="detail-value">${duration}</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">State Transitions</span>
+                            <span class="detail-value">${events ? events.length : 0}</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Worker</span>
+                            <span class="detail-value">${activity.current_worker_id || activity.last_worker_id || '—'}</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Queue</span>
+                            <span class="detail-value">${activity.queue_name || '—'}</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Retries</span>
+                            <span class="detail-value">${activity.retry_count} / ${activity.max_retries || '∞'}</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Timeout</span>
+                            <span class="detail-value">${activity.timeout_seconds}s</span>
+                        </div>
+                    </div>
+                </div>
+
+                ${errorHtml}
+
+                <div class="detail-section" id="input-section-container"></div>
+
+                <div class="detail-section" id="result-section-container"></div>
+
+                <div class="detail-section">
+                    <h3>Metadata</h3>
+                    ${metadataHtml}
+                </div>
+
+                <div class="detail-section">
+                    <h3>Event History</h3>
+                    ${eventsHtml}
+                </div>
+            `;
+            
+            // Safely append input and result sections using DOM APIs
+            const inputContainer = document.getElementById('input-section-container');
+            const resultContainer = document.getElementById('result-section-container');
+            
+            if (inputContainer) {
+                const inputSection = createInputSection();
+                inputContainer.appendChild(inputSection);
+            }
+            
+            if (resultContainer) {
+                const resultSection = createResultSection();
+                resultContainer.appendChild(resultSection);
+            }
+        };
+
+        const clearDetailPanel = () => {
+            selectedActivityId = null;
+            const panel = document.getElementById('detail-panel');
+            panel.className = 'detail-panel empty';
+            panel.innerHTML = '<p>Select an activity to inspect its details</p>';
+            renderActivityTable(filteredActivities);
+        };
+
+        const escapeHtml = (text) => {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        };
+
+        const renderTimelineView = (events, viewMode) => {
+            if (viewMode === 'compact') {
+                // Compact list view
+                return `<ol class="timeline">
+                    ${events.map(event => `
+                        <li class="timeline-item ${event.event_type}">
+                            <div class="timeline-header">
+                                <span class="timeline-type">${escapeHtml(event.event_type)}</span>
+                                <span class="timeline-time">${formatRelativeTime(event.timestamp)}</span>
+                            </div>
+                            ${event.worker_id ? `<div class="timeline-worker">Worker: ${escapeHtml(event.worker_id)}</div>` : ''}
+                        </li>
+                    `).join('')}
+                </ol>`;
+            } else if (viewMode === 'visual') {
+                // Visual timeline with bars (simplified)
+                return `<div class="timeline-visual">
+                    ${events.map((event, idx) => {
+                        const nextEvent = events[idx + 1];
+                        const duration = nextEvent 
+                            ? new Date(nextEvent.timestamp) - new Date(event.timestamp)
+                            : 2000; // Default 2s if no next event
+                        const width = Math.max(Math.min(duration / 100, 300), 80); // Scale and cap width
+                        
+                        let barClass = 'running';
+                        if (event.event_type === 'Completed') barClass = 'completed';
+                        else if (event.event_type === 'Failed') barClass = 'failed';
+                        else if (event.event_type === 'Retrying') barClass = 'retrying';
+                        
+                        return `
+                        <div class="timeline-bar-container">
+                            <div class="timeline-bar ${barClass}" style="width: ${width}px;" title="${escapeHtml(event.event_type + ' at ' + formatDate(event.timestamp))}">
+                                ${escapeHtml(event.event_type)}
+                            </div>
+                            <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">
+                                ${formatRelativeTime(event.timestamp)}
+                            </div>
+                        </div>
+                        `;
+                    }).join('')}
+                </div>`;
+            } else {
+                // Detailed view with all info
+                return `<ol class="timeline">
+                    ${events.map(event => `
+                        <li class="timeline-item ${event.event_type}">
+                            <div class="timeline-header">
+                                <span class="timeline-type">${escapeHtml(event.event_type)}</span>
+                                <span class="timeline-time">${formatDate(event.timestamp)}</span>
+                            </div>
+                            ${event.worker_id ? `<div class="timeline-worker">Worker: ${escapeHtml(event.worker_id)}</div>` : ''}
+                            ${event.detail ? `<pre class="timeline-detail">${escapeHtml(JSON.stringify(event.detail, null, 2))}</pre>` : ''}
+                        </li>
+                    `).join('')}
+                </ol>`;
+            }
+        };
+
+        const formatRelativeTime = (isoString) => {
+            if (!isoString) return '—';
+            const date = new Date(isoString);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffSecs = Math.floor(diffMs / 1000);
+            const diffMins = Math.floor(diffSecs / 60);
+            const diffHours = Math.floor(diffMins / 60);
+            const diffDays = Math.floor(diffHours / 24);
+
+            if (diffSecs < 60) return `${diffSecs}s ago`;
+            if (diffMins < 60) return `${diffMins}m ago`;
+            if (diffHours < 24) return `${diffHours}h ago`;
+            return `${diffDays}d ago`;
+        };
+
+        const setTimelineView = (activityId, viewMode) => {
+            const timelineContainer = document.getElementById(`timeline-${activityId}`);
+            if (!timelineContainer) return;
+
+            // Update active button
+            document.querySelectorAll('.timeline-view-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.view === viewMode);
+            });
+
+            // Re-fetch and render
+            loadActivityDetail(activityId);
+        };
+
+        // Event Handlers
+        const selectActivity = (activityId) => {
+            selectedActivityId = activityId;
+            renderActivityTable(filteredActivities);
+            loadActivityDetail(activityId);
+        };
+
+        const switchCollection = (collection) => {
+            currentCollection = collection;
+            selectedActivityId = null;
+            
+            // Update tabs
+            document.querySelectorAll('.tabs button').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.collection === collection);
+            });
+
+            loadActivities(collection);
+        };
+
+        // Connection status management
+        const updateConnectionStatus = (status, message) => {
+            const statusEl = document.getElementById('connection-status');
+            if (!statusEl) return;
+            
+            statusEl.className = `connection-status ${status}`;
+            statusEl.textContent = message;
+            
+            // Auto-hide connected status after 3 seconds
+            if (status === 'connected') {
+                setTimeout(() => {
+                    statusEl.style.opacity = '0';
+                    setTimeout(() => {
+                        statusEl.style.display = 'none';
+                    }, 300);
+                }, 3000);
+            } else {
+                statusEl.style.display = 'flex';
+                statusEl.style.opacity = '1';
+            }
+        };
+
+        // SSE Connection for real-time updates
+        const connectEventStream = () => {
+            const streamUrl = `${API_BASE}/stream`;
+            
+            updateConnectionStatus('connecting', 'Connecting...');
+            
+            eventSource = new EventSource(streamUrl);
+            
+            eventSource.onopen = () => {
+                console.log('Connected to real-time updates');
+                updateConnectionStatus('connected', 'Connected');
+                clearErrorBanner();
+            };
+            
+            eventSource.onmessage = (event) => {
+                const activityEvent = JSON.parse(event.data);
+                handleActivityEvent(activityEvent);
+            };
+            
+            eventSource.onerror = (error) => {
+                console.error('Connection error:', error);
+                updateConnectionStatus('disconnected', 'Disconnected');
+                showError('Lost connection to server. Reconnecting...');
+                eventSource.close();
+                
+                // Attempt reconnection after 3 seconds
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                reconnectTimer = setTimeout(() => {
+                    connectEventStream();
+                }, 3000);
+            };
+        };
+
+        const handleActivityEvent = (event) => {
+            // Always refresh stats on any event
+                loadStats();
+            
+            // If this is the selected activity, refresh its details
+            if (selectedActivityId === event.activity_id) {
+                loadActivityDetail(event.activity_id);
+            }
+            
+            // For real-time updates, we only do a full reload for certain critical events
+            // or if the activity might have moved between collections
+            const criticalEvents = ['Enqueued', 'DeadLetter', 'Completed', 'Failed'];
+            const shouldReload = criticalEvents.includes(event.event_type);
+            
+            if (shouldReload) {
+                // Determine which collection this event affects
+                const eventCollection = getCollectionForEvent(event);
+                
+                // Only refresh if viewing the affected collection
+                if (eventCollection === currentCollection) {
+                    // Use a debounced reload to avoid multiple rapid reloads
+                    debouncedReloadActivities();
+                }
+            }
+        };
+
+        // Debounced reload to prevent rapid successive reloads
+        let reloadTimer = null;
+        const debouncedReloadActivities = () => {
+            if (reloadTimer) clearTimeout(reloadTimer);
+            reloadTimer = setTimeout(() => {
+                loadActivitiesQuiet(currentCollection);
+            }, 500);
+        };
+
+        // Silent reload without loading skeleton
+        const loadActivitiesQuiet = async (collection) => {
+            try {
+                const data = await fetchJSON(`${API_BASE}/activities/${collection}?limit=${activityLimit}`);
+                activities = data;
+                
+                // Update activity types for filter dropdown
+                data.forEach(activity => allActivityTypes.add(activity.activity_type));
+                updateActivityTypeFilter();
+                
+                // Apply filters
+                applyFilters();
+                
+            } catch (error) {
+                console.error('Failed to load activities:', error);
+            }
+        };
+
+        const getCollectionForEvent = (event) => {
+            switch (event.event_type) {
+                case 'Enqueued':
+                case 'Requeued':
+                    return 'pending';
+                case 'Started':
+                case 'LeaseExtended':
+                    return 'processing';
+                case 'Scheduled':
+                case 'Retrying':
+                    return 'scheduled';
+                case 'Completed':
+                    return 'completed';
+                case 'DeadLetter':
+                    return 'dead_letter';
+                case 'Failed':
+                    return 'processing';  // Might be in processing before completion
+                default:
+                    return null;
+            }
+        };
+
+        const clearErrorBanner = () => {
+            document.getElementById('error-container').innerHTML = '';
+        };
+
+        // Initialization
+        document.addEventListener('DOMContentLoaded', () => {
+            // Setup tab listeners
+            document.querySelectorAll('.tabs button').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    switchCollection(btn.dataset.collection);
+                });
+            });
+
+            // Setup search and filter listeners
+            const searchInput = document.getElementById('search-input');
+            const filterTypeSelect = document.getElementById('filter-type');
+            const clearFiltersBtn = document.getElementById('clear-filters');
+
+            let searchDebounce = null;
+            searchInput.addEventListener('input', (e) => {
+                clearTimeout(searchDebounce);
+                searchDebounce = setTimeout(() => {
+                    searchTerm = e.target.value;
+                    applyFilters();
+                }, 300);
+            });
+
+            filterTypeSelect.addEventListener('change', (e) => {
+                filterType = e.target.value;
+                applyFilters();
+            });
+
+            clearFiltersBtn.addEventListener('click', () => {
+                searchInput.value = '';
+                filterTypeSelect.value = '';
+                searchTerm = '';
+                filterType = '';
+                applyFilters();
+            });
+
+            // Setup limit selector
+            const limitSelect = document.getElementById('limit-select');
+            const limitCustomInput = document.getElementById('limit-custom-input');
+
+            // Initialize limit selector with saved value
+            const savedLimit = localStorage.getItem('runnerq_activity_limit') || '50';
+            if (['10', '50', '100'].includes(savedLimit)) {
+                limitSelect.value = savedLimit;
+            } else {
+                limitSelect.value = 'custom';
+                limitCustomInput.value = savedLimit;
+                limitCustomInput.classList.add('visible');
+            }
+
+            limitSelect.addEventListener('change', (e) => {
+                const value = e.target.value;
+                if (value === 'custom') {
+                    limitCustomInput.classList.add('visible');
+                    limitCustomInput.focus();
+                    // Use current value if custom input has one
+                    if (limitCustomInput.value) {
+                        activityLimit = parseInt(limitCustomInput.value, 10) || 50;
+                        localStorage.setItem('runnerq_activity_limit', activityLimit.toString());
+                        loadActivities(currentCollection);
+                    }
+                } else {
+                    limitCustomInput.classList.remove('visible');
+                    activityLimit = parseInt(value, 10);
+                    localStorage.setItem('runnerq_activity_limit', value);
+                    loadActivities(currentCollection);
+                }
+            });
+
+            limitCustomInput.addEventListener('change', (e) => {
+                const value = parseInt(e.target.value, 10);
+                if (value > 0 && value <= 1000) {
+                    activityLimit = value;
+                    localStorage.setItem('runnerq_activity_limit', value.toString());
+                    loadActivities(currentCollection);
+                } else {
+                    // Reset to last valid value
+                    e.target.value = activityLimit;
+                }
+            });
+
+            limitCustomInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    e.target.blur(); // Trigger change event
+                }
+            });
+
+            // Initial load
+            loadStats();
+            loadActivities(currentCollection);
+            
+            // Connect to SSE for real-time updates
+            connectEventStream();
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (eventSource) {
+                eventSource.close();
+            }
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+            }
+        });
+
+        // Copy to clipboard function
+        const copyToClipboard = async (elementId, button) => {
+            const element = document.getElementById(elementId);
+            if (!element) return;
+            
+            try {
+                await navigator.clipboard.writeText(element.textContent);
+                const originalText = button.textContent;
+                button.textContent = '✓ Copied!';
+                button.classList.add('copied');
+                
+                setTimeout(() => {
+                    button.textContent = originalText;
+                    button.classList.remove('copied');
+                }, 2000);
+            } catch (err) {
+                console.error('Failed to copy:', err);
+            }
+        };
+
+        // Filter by status function
+        const filterByStatus = (status) => {
+            if (!status) return;
+            
+            // Map status to collection
+            const statusToCollection = {
+                'running': 'processing',
+                'processing': 'processing',
+                'started': 'processing',
+                'dequeued': 'processing',
+                'pending': 'pending',
+                'enqueued': 'pending',
+                'queued': 'pending',
+                'completed': 'completed',
+                'success': 'completed',
+                'succeeded': 'completed',
+                'failed': 'dead_letter',
+                'error': 'dead_letter',
+                'dead_letter': 'dead_letter',
+                'deadletter': 'dead_letter',
+                'scheduled': 'scheduled',
+                'scheduled_future': 'scheduled'
+            };
+            
+            // Normalize status to lowercase for lookup
+            const normalizedStatus = status.toLowerCase().trim();
+            const collection = statusToCollection[normalizedStatus];
+            
+            // If we found a matching collection, switch to it
+            if (collection) {
+                switchCollection(collection);
+            } else {
+                // Gracefully handle unknown status - default to pending
+                console.warn(`Unknown status "${status}", defaulting to pending collection`);
+                switchCollection('pending');
+            }
+        };
+
+        // Make functions globally accessible
+        window.selectActivity = selectActivity;
+        window.clearDetailPanel = clearDetailPanel;
+        window.copyToClipboard = copyToClipboard;
+        window.setTimelineView = setTimelineView;
+        window.sortBy = sortBy;
+        window.filterByStatus = filterByStatus;
+        window.filterByPriority = filterByPriority;
+        window.switchCollection = switchCollection;
+    </script>
+</body>
+</html>
+

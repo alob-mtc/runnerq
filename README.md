@@ -14,6 +14,7 @@ A robust, scalable Redis-based activity queue and worker system for Rust applica
 - **Comprehensive error handling** - Retryable and non-retryable error types
 - **Activity metadata** - Support for custom metadata on activities
 - **Redis persistence** - Activities are stored in Redis for durability
+- **Built-in observability console** - Real-time web UI for monitoring and managing activities
 - **Queue statistics** - Monitoring capabilities and metrics collection
 
 ## Installation
@@ -687,21 +688,36 @@ impl ActivityHandler for MyActivity {
 
 ### Queue Statistics
 
-Monitor queue performance and health:
+Monitor queue performance and health using the inspector:
 
 ```rust
-use runner_q::{ActivityQueue, QueueStats};
+use runner_q::{WorkerEngine, QueueStats};
+
+let engine = WorkerEngine::builder()
+    .redis_url("redis://localhost:6379")
+    .queue_name("my_app")
+    .build()
+    .await?;
+
+// Get the inspector
+let inspector = engine.inspector();
 
 // Get queue statistics
-let stats: QueueStats = activity_queue.get_stats().await?;
+let stats: QueueStats = inspector.stats().await?;
 
 println!("Queue stats:");
-println!("  Pending activities: {}", stats.pending_count);
-println!("  Running activities: {}", stats.running_count);
-println!("  Completed activities: {}", stats.completed_count);
-println!("  Failed activities: {}", stats.failed_count);
-println!("  Dead letter queue size: {}", stats.dead_letter_count);
+println!("  Pending activities: {}", stats.pending_activities);
+println!("  Processing activities: {}", stats.processing_activities);
+println!("  Scheduled activities: {}", stats.scheduled_activities);
+println!("  Dead letter queue size: {}", stats.dead_letter_activities);
+println!("Priority distribution:");
+println!("  Critical: {}", stats.critical_priority);
+println!("  High: {}", stats.high_priority);
+println!("  Normal: {}", stats.normal_priority);
+println!("  Low: {}", stats.low_priority);
 ```
+
+For a visual dashboard with real-time updates, see the [Observability Console](#observability-console) section.
 
 ## Error Handling
 
@@ -870,6 +886,108 @@ let engine = WorkerEngine::builder()
     .build()
     .await?;
 ```
+
+## Observability Console
+
+Runner-Q includes a built-in web-based observability console for monitoring and managing your activity queues in real-time.
+
+### Features
+
+- **Real-time Updates** - Server-Sent Events (SSE) for instant activity updates
+- **Live Statistics** - Monitor queue health with processing, pending, scheduled, and dead-letter counts
+- **Priority Distribution** - See activity breakdown by priority level (Critical, High, Normal, Low)
+- **Activity Management** - Browse and search activities across all queues (pending, processing, scheduled, completed, dead-letter)
+- **Activity Results** - View execution results and outputs for completed activities
+- **Event Timeline** - Detailed activity lifecycle events with multiple view modes
+- **7-Day History** - Query completed activities for up to 7 days
+- **Zero Setup** - No build tools, npm, or dependencies required
+
+### Dashboard Preview
+
+![RunnerQ Console Dashboard](asset/ui-dashbord.png)
+
+### Quick Start
+
+The console is designed to work just like Swagger UI - simply pass an inspector instance:
+
+```rust
+use runner_q::{runnerq_ui, WorkerEngine};
+use axum::{serve, Router};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let engine = WorkerEngine::builder()
+        .redis_url("redis://127.0.0.1:6379")
+        .queue_name("my_app")
+        .build()
+        .await?;
+
+    // Get inspector from engine (automatically enables event streaming)
+    let inspector = engine.inspector();
+
+    // Nest the console at /console - just like Swagger UI!
+    let app = Router::new()
+        .nest("/console", runnerq_ui(inspector));
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8081").await?;
+    println!("✨ RunnerQ Console: http://localhost:8081/console");
+    
+    serve(listener, app).await?;
+    Ok(())
+}
+```
+
+### Integration with Existing Apps
+
+You can easily integrate the console into your existing Axum application:
+
+```rust
+use runner_q::{runnerq_ui, WorkerEngine};
+use axum::Router;
+
+let engine = WorkerEngine::builder()
+    .redis_url("redis://localhost:6379")
+    .queue_name("my_app")
+    .build()
+    .await?;
+
+let inspector = engine.inspector();
+
+// Your existing app routes
+let app = Router::new()
+    .route("/api/users", get(list_users))
+    .route("/api/posts", get(list_posts))
+    // Add the console
+    .nest("/console", runnerq_ui(inspector))
+    .with_state(app_state);
+```
+
+### API-Only Mode
+
+If you prefer to build a custom UI, you can serve just the API:
+
+```rust
+use runner_q::observability_api;
+
+let app = Router::new()
+    .nest("/api/observability", observability_api(inspector));
+```
+
+### Example
+
+See the complete example in `examples/console_ui.rs`:
+
+```bash
+# Start Redis
+redis-server
+
+# Run the console example
+cargo run --example console_ui
+
+# Open http://localhost:8081/console
+```
+
+For more details, see the [UI README](ui/README.md).
 
 ## License
 

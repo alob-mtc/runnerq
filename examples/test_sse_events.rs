@@ -1,0 +1,137 @@
+use async_trait::async_trait;
+use axum::{serve, Router};
+use runner_q::{runnerq_ui, ActivityContext, ActivityHandler, ActivityHandlerResult, WorkerEngine};
+use std::sync::Arc;
+use std::time::Duration;
+use tower_http::cors::{Any, CorsLayer};
+
+/// Test activity that simulates work
+struct TestActivity;
+
+#[async_trait]
+impl ActivityHandler for TestActivity {
+    async fn handle(
+        &self,
+        payload: serde_json::Value,
+        _ctx: ActivityContext,
+    ) -> ActivityHandlerResult {
+        println!("🔄 Processing test activity: {:?}", payload);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        println!("✅ Completed test activity");
+        Ok(Some(serde_json::json!({"status": "completed"})))
+    }
+
+    fn activity_type(&self) -> String {
+        "test_activity".to_string()
+    }
+}
+
+/// Example to test SSE event emission
+///
+/// This example:
+/// 1. Starts a worker engine with a test activity handler
+/// 2. Serves the console UI with SSE
+/// 3. Automatically enqueues test activities every 5 seconds
+/// 4. You should see events in the browser console
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Enable logging to see what's happening
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
+
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+
+    // Build worker engine
+    let mut engine = WorkerEngine::builder()
+        .redis_url(&redis_url)
+        .queue_name("test_sse")
+        .max_workers(2)
+        .build()
+        .await?;
+
+    // Register test activity handler
+    engine.register_activity("test_activity".to_string(), Arc::new(TestActivity));
+
+    // Get inspector for UI - event streaming is auto-enabled
+    let inspector = engine.inspector();
+
+    // Clone executor for background task
+    let executor = engine.get_activity_executor();
+
+    // Start worker engine in background
+    let engine_clone = Arc::new(engine);
+    let engine_handle = {
+        let engine = engine_clone.clone();
+        tokio::spawn(async move {
+            println!("🚀 Worker engine starting...");
+            if let Err(e) = engine.start().await {
+                eprintln!("❌ Worker engine error: {}", e);
+            }
+        })
+    };
+
+    // Enqueue test activities periodically
+    tokio::spawn(async move {
+        println!("⏳ Waiting 3 seconds before first test activity...");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        let mut counter = 1;
+        loop {
+            println!("\n📤 Enqueueing test activity #{}", counter);
+            match executor
+                .activity("test_activity")
+                .payload(serde_json::json!({
+                    "test": true,
+                    "counter": counter,
+                    "timestamp": chrono::Utc::now().to_rfc3339()
+                }))
+                .execute()
+                .await
+            {
+                Ok(_) => println!("✓ Activity #{} enqueued successfully", counter),
+                Err(e) => eprintln!("✗ Failed to enqueue activity: {}", e),
+            }
+
+            counter += 1;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+
+    // Build UI app
+    let app = Router::new().nest("/console", runnerq_ui(inspector)).layer(
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any),
+    );
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8081").await?;
+    let bound_addr = listener.local_addr()?;
+
+    println!("\n╔══════════════════════════════════════════════════╗");
+    println!("║  🎯 SSE Test Server Running                      ║");
+    println!("╠══════════════════════════════════════════════════╣");
+    println!("║  Console UI:  http://{}/console          ║", bound_addr);
+    println!(
+        "║  SSE Stream:  http://{}/console/api/observability/stream ║",
+        bound_addr
+    );
+    println!("╠══════════════════════════════════════════════════╣");
+    println!("║  📡 Events you should see:                       ║");
+    println!("║     1. Enqueued   - When activity added         ║");
+    println!("║     2. Dequeued   - When worker picks it up     ║");
+    println!("║     3. Started    - When processing begins      ║");
+    println!("║     4. Completed  - When processing finishes    ║");
+    println!("╠══════════════════════════════════════════════════╣");
+    println!("║  🔍 Check browser DevTools console for events   ║");
+    println!("║  📊 Activities auto-enqueue every 5 seconds     ║");
+    println!("╚══════════════════════════════════════════════════╝\n");
+
+    serve(listener, app).await?;
+
+    // Cleanup
+    engine_handle.abort();
+    Ok(())
+}
