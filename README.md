@@ -902,6 +902,10 @@ Runner-Q includes a built-in web-based observability console for monitoring and 
 - **7-Day History** - Query completed activities for up to 7 days
 - **Zero Setup** - No build tools, npm, or dependencies required
 
+### Dashboard Preview
+
+![RunnerQ Console Dashboard](asset/ui-dashbord.png)
+
 ### Quick Start
 
 The console is designed to work just like Swagger UI - simply pass an inspector instance:
