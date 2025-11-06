@@ -239,7 +239,8 @@ impl WorkerEngine {
         let mut inspector = QueueInspector::new(
             self.queue_core.redis_pool(),
             self.queue_core.queue_name().to_string(),
-        );
+        )
+        .with_max_workers(self.config.max_concurrent_activities);
 
         // Get existing event channel or create one for the inspector
         if let Some(tx) = self.queue_core.event_channel() {

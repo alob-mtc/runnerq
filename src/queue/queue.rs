@@ -1461,6 +1461,7 @@ pub struct QueueStats {
     pub low_priority: u64,
     pub scheduled_activities: u64,
     pub dead_letter_activities: u64,
+    pub max_workers: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize)]

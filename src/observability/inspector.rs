@@ -19,6 +19,7 @@ pub struct QueueInspector {
     redis_pool: Pool<RedisConnectionManager>,
     queue_name: String,
     event_tx: Option<broadcast::Sender<ActivityEvent>>,
+    max_workers: Option<usize>,
 }
 
 impl QueueInspector {
@@ -26,12 +27,18 @@ impl QueueInspector {
         Self {
             redis_pool,
             queue_name: queue_name.into(),
+            max_workers: None,
             event_tx: None,
         }
     }
 
     pub fn with_event_stream(mut self, sender: broadcast::Sender<ActivityEvent>) -> Self {
         self.event_tx = Some(sender);
+        self
+    }
+
+    pub fn with_max_workers(mut self, max_workers: usize) -> Self {
+        self.max_workers = Some(max_workers);
         self
     }
 
@@ -312,6 +319,7 @@ impl QueueInspector {
             low_priority: pending_low + processing_low,
             scheduled_activities: scheduled_count,
             dead_letter_activities: dead_letter_count,
+            max_workers: self.max_workers,
         })
     }
 

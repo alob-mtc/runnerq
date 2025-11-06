@@ -74,6 +74,28 @@
             font-size: 0.9rem;
         }
 
+        .worker-info {
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 8px;
+            padding: 0.5rem 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .worker-info-label {
+            font-size: 0.85rem;
+            color: rgba(249, 250, 251, 0.7);
+            font-weight: 500;
+        }
+
+        .worker-info-value {
+            font-size: 1rem;
+            color: var(--text-light);
+            font-weight: 700;
+        }
+
         .app-main {
             flex: 1;
             padding: 2rem;
@@ -1297,6 +1319,11 @@
                 font-size: 0.8rem;
             }
 
+            .worker-info {
+                font-size: 0.85rem;
+                padding: 0.4rem 0.75rem;
+            }
+
             .stats-grid {
                 grid-template-columns: repeat(2, 1fr);
             }
@@ -1327,6 +1354,10 @@
             <div class="header-content">
                 <h1>RunnerQ Console</h1>
                 <p class="subtitle">Operational visibility for the RunnerQ worker fleet</p>
+            </div>
+            <div class="worker-info" id="worker-info" style="display: none;">
+                <span class="worker-info-label">Workers:</span>
+                <span class="worker-info-value" id="worker-count">-</span>
             </div>
         </header>
 
@@ -1548,6 +1579,16 @@
                 updatePriorityItem('high', stats.high_priority || 0);
                 updatePriorityItem('normal', stats.normal_priority || 0);
                 updatePriorityItem('low', stats.low_priority || 0);
+                
+                // Update worker count if available
+                if (stats.max_workers !== undefined && stats.max_workers !== null) {
+                    const workerInfo = document.getElementById('worker-info');
+                    const workerCount = document.getElementById('worker-count');
+                    if (workerInfo && workerCount) {
+                        workerCount.textContent = stats.max_workers;
+                        workerInfo.style.display = 'flex';
+                    }
+                }
                 
                 previousStats = stats;
             } catch (error) {
