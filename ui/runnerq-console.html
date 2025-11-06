@@ -304,7 +304,14 @@
             box-shadow: var(--shadow);
             display: flex;
             flex-direction: column;
+            max-height: calc(100vh - 280px);
             overflow: hidden;
+        }
+
+        #activity-table-container {
+            overflow-y: auto;
+            flex: 1;
+            min-height: 0;
         }
 
         .section-header {
@@ -1261,6 +1268,10 @@
                 padding: 1rem;
             }
 
+            .activities {
+                max-height: calc(100vh - 320px);
+            }
+
             .stats-grid {
                 grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
             }
@@ -1338,6 +1349,10 @@
 
             .limit-custom-input {
                 width: 100%;
+            }
+
+            .activities {
+                max-height: calc(100vh - 360px);
             }
 
             .activity-id {
