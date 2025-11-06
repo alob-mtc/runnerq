@@ -21,6 +21,11 @@ serde_json = "1.0.143"
 chrono = { version = "0.4.41", features = ["serde"] }
 thiserror = "2.0.16"
 tracing = "0.1"
+tracing-subscriber = "0.3"
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
 tokio-util = "0.7.16"
+axum = { version = "0.7", features = ["json"] }
+anyhow = "1.0"
+tower-http = { version = "0.5", features = ["cors"] }
+tokio-stream = { version = "0.1", features = ["sync"] }

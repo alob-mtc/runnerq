@@ -200,13 +200,17 @@
 
 pub mod activity;
 pub mod config;
+pub mod observability;
 pub mod queue;
 pub mod runner;
 pub mod worker;
 
 // Re-export main types for easy access
 pub use crate::config::WorkerConfig;
-pub use crate::queue::queue::{ActivityQueue, QueueStats};
+pub use crate::observability::{DeadLetterRecord, QueueInspector, observability_api, runnerq_ui};
+pub use crate::queue::queue::{
+    ActivityEvent, ActivityEventType, ActivityQueue, ActivitySnapshot, QueueStats,
+};
 pub use crate::runner::error::WorkerError;
 pub use crate::runner::redis::RedisConfig;
 pub use crate::runner::runner::{
@@ -214,5 +218,6 @@ pub use crate::runner::runner::{
 };
 pub use activity::activity::{
     ActivityContext, ActivityFuture, ActivityHandler, ActivityHandlerResult, ActivityPriority,
+    ActivityStatus,
 };
 pub use activity::error::{ActivityError, RetryableError};

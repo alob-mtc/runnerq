@@ -4,10 +4,16 @@ use crate::{
     ActivityPriority,
 };
 use async_trait::async_trait;
+use bb8_redis::bb8::PooledConnection;
 use bb8_redis::{bb8::Pool, RedisConnectionManager};
+use chrono::{DateTime, Utc};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 /// Trait defining the interface for activity queue operations
@@ -19,8 +25,19 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
     /// Dequeue the next available activity with timeout
     async fn dequeue(&self, timeout: Duration) -> Result<Option<Activity>, WorkerError>;
 
+    /// Assign a worker to an activity that has been dequeued.
+    async fn assign_worker(
+        &self,
+        activity_id: uuid::Uuid,
+        worker_id: &str,
+    ) -> Result<(), WorkerError>;
+
     /// Mark a activity as completed
-    async fn mark_completed(&self, activity_id: uuid::Uuid) -> Result<(), WorkerError>;
+    async fn mark_completed(
+        &self,
+        activity: &Activity,
+        worker_id: Option<&str>,
+    ) -> Result<(), WorkerError>;
 
     /// Mark a activity as failed and optionally requeue for retry
     async fn mark_failed(
@@ -28,6 +45,7 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
         activity: Activity,
         error_message: String,
         retryable: bool,
+        worker_id: Option<&str>,
     ) -> Result<(), WorkerError>;
 
     /// Schedule an activity for future execution
@@ -45,10 +63,6 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
         activity_id: uuid::Uuid,
         extend_by: std::time::Duration,
     ) -> Result<bool, WorkerError>;
-
-    #[allow(dead_code)]
-    /// Get queue statistics
-    async fn get_stats(&self) -> Result<QueueStats, WorkerError>;
 
     /// Store activity result
     async fn store_result(
@@ -86,9 +100,14 @@ pub struct ActivityQueue {
     queue_name: String,
     /// Default lease duration in milliseconds used when claiming items
     default_lease_ms: u64,
+    event_tx: Arc<RwLock<Option<broadcast::Sender<ActivityEvent>>>>,
 }
 
 impl ActivityQueue {
+    const SNAPSHOT_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
+    const EVENT_TTL_SECONDS: i64 = Self::SNAPSHOT_TTL_SECONDS;
+    const EVENT_MAX_LEN: isize = 200;
+
     /// Creates a new ActivityQueue backed by the given Redis connection pool and using `queue_name` as the key prefix.
     ///
     /// `queue_name` is used as the prefix for Redis keys (for example: `"<queue_name>:priority_queue"`), so choose a stable, unique name per logical queue.
@@ -108,6 +127,7 @@ impl ActivityQueue {
             redis_pool,
             queue_name,
             default_lease_ms,
+            event_tx: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -130,6 +150,39 @@ impl ActivityQueue {
     /// Return the Redis key used for the processing ZSET (holds leases by deadline ms)
     fn get_processing_queue_key(&self) -> String {
         format!("{}:processing", self.queue_name)
+    }
+
+    pub fn redis_pool(&self) -> Pool<RedisConnectionManager> {
+        self.redis_pool.clone()
+    }
+
+    pub fn queue_name(&self) -> &str {
+        &self.queue_name
+    }
+
+    pub fn set_event_channel(&self, sender: broadcast::Sender<ActivityEvent>) {
+        if let Ok(mut guard) = self.event_tx.write() {
+            *guard = Some(sender);
+        }
+    }
+
+    pub fn event_channel(&self) -> Option<broadcast::Sender<ActivityEvent>> {
+        self.event_tx
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned())
+    }
+
+    fn get_activity_key(&self, activity_id: &uuid::Uuid) -> String {
+        format!("activity:{}", activity_id)
+    }
+
+    fn get_activity_events_key(&self, activity_id: &uuid::Uuid) -> String {
+        format!("activity:{}:events", activity_id)
+    }
+
+    fn now() -> DateTime<Utc> {
+        Utc::now()
     }
 
     /// Compute a numeric score for the Redis sorted set that encodes priority and FIFO order.
@@ -225,33 +278,159 @@ impl ActivityQueue {
         }
     }
 
-    /// Update the stored status of an activity in Redis.
-    ///
-    /// Writes the JSON-serialized `status` into the hash key `activity:<activity_id>` under the field `"status"`.
-    /// Returns Ok(()) on success or a `WorkerError::QueueError` if a Redis connection cannot be obtained or on serialization/Redis errors.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # async fn example(queue: &ActivityQueue) -> Result<(), WorkerError> {
-    /// let id = uuid::Uuid::new_v4();
-    /// queue.update_activity_status(&id, &ActivityStatus::Running).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    async fn update_activity_status(
+    async fn write_snapshot(
         &self,
-        activity_id: &uuid::Uuid,
-        status: &ActivityStatus,
+        conn: &mut PooledConnection<'_, RedisConnectionManager>,
+        snapshot: &ActivitySnapshot,
     ) -> Result<(), WorkerError> {
-        let mut conn = self.redis_pool.get().await.map_err(|e| {
-            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
-        })?;
+        let activity_key = self.get_activity_key(&snapshot.id);
+        let mut fields: Vec<(String, String)> = Vec::new();
 
-        let activity_key = format!("activity:{}", activity_id);
+        fields.push(("snapshot".to_string(), serde_json::to_string(snapshot)?));
+        fields.push((
+            "status".to_string(),
+            serde_json::to_string(&snapshot.status)?,
+        ));
+        fields.push((
+            "priority".to_string(),
+            serde_json::to_string(&snapshot.priority)?,
+        ));
+        fields.push(("activity_type".to_string(), snapshot.activity_type.clone()));
+        fields.push((
+            "payload".to_string(),
+            serde_json::to_string(&snapshot.payload)?,
+        ));
+        fields.push(("created_at".to_string(), snapshot.created_at.to_rfc3339()));
+        fields.push((
+            "scheduled_at".to_string(),
+            snapshot
+                .scheduled_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+        ));
+        fields.push((
+            "started_at".to_string(),
+            snapshot
+                .started_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+        ));
+        fields.push((
+            "completed_at".to_string(),
+            snapshot
+                .completed_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+        ));
+        fields.push((
+            "current_worker_id".to_string(),
+            snapshot.current_worker_id.clone().unwrap_or_default(),
+        ));
+        fields.push((
+            "last_worker_id".to_string(),
+            snapshot.last_worker_id.clone().unwrap_or_default(),
+        ));
+        fields.push(("retry_count".to_string(), snapshot.retry_count.to_string()));
+        fields.push(("max_retries".to_string(), snapshot.max_retries.to_string()));
+        fields.push((
+            "timeout_seconds".to_string(),
+            snapshot.timeout_seconds.to_string(),
+        ));
+        fields.push((
+            "retry_delay_seconds".to_string(),
+            snapshot.retry_delay_seconds.to_string(),
+        ));
+        fields.push((
+            "metadata".to_string(),
+            serde_json::to_string(&snapshot.metadata)?,
+        ));
+        fields.push((
+            "last_error".to_string(),
+            snapshot.last_error.clone().unwrap_or_default(),
+        ));
+        fields.push((
+            "last_error_at".to_string(),
+            snapshot
+                .last_error_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+        ));
+        fields.push((
+            "status_updated_at".to_string(),
+            snapshot.status_updated_at.to_rfc3339(),
+        ));
+        fields.push((
+            "score".to_string(),
+            snapshot.score.map(|s| s.to_string()).unwrap_or_default(),
+        ));
+        fields.push((
+            "lease_deadline_ms".to_string(),
+            snapshot
+                .lease_deadline_ms
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+        ));
+        fields.push((
+            "processing_member".to_string(),
+            snapshot.processing_member.clone().unwrap_or_default(),
+        ));
+
+        let _: () = conn.hset_multiple(&activity_key, &fields).await?;
         let _: () = conn
-            .hset(&activity_key, "status", serde_json::to_string(status)?)
+            .expire(&activity_key, Self::SNAPSHOT_TTL_SECONDS)
             .await?;
+        Ok(())
+    }
+
+    async fn load_snapshot(
+        &self,
+        conn: &mut PooledConnection<'_, RedisConnectionManager>,
+        activity_id: &uuid::Uuid,
+    ) -> Result<ActivitySnapshot, WorkerError> {
+        let activity_key = self.get_activity_key(activity_id);
+        let snapshot_json: Option<String> = conn.hget(&activity_key, "snapshot").await?;
+        if let Some(json) = snapshot_json {
+            serde_json::from_str(&json).map_err(|e| {
+                WorkerError::QueueError(format!("Failed to deserialize activity snapshot: {}", e))
+            })
+        } else {
+            Err(WorkerError::QueueError(format!(
+                "No snapshot found for activity {}",
+                activity_id
+            )))
+        }
+    }
+
+    async fn record_event(
+        &self,
+        conn: &mut PooledConnection<'_, RedisConnectionManager>,
+        activity_id: &uuid::Uuid,
+        event_type: ActivityEventType,
+        worker_id: Option<&str>,
+        detail: Option<Value>,
+    ) -> Result<(), WorkerError> {
+        let activity_event = ActivityEvent {
+            activity_id: *activity_id,
+            timestamp: Self::now(),
+            event_type,
+            worker_id: worker_id.map(|s| s.to_string()),
+            detail,
+        };
+
+        let events_key = self.get_activity_events_key(activity_id);
+        let payload = serde_json::to_string(&activity_event)?;
+        let _: () = conn.rpush(&events_key, payload).await?;
+        let _: () = conn.ltrim(&events_key, -Self::EVENT_MAX_LEN, -1).await?;
+        let _: () = conn.expire(&events_key, Self::EVENT_TTL_SECONDS).await?;
+
+        if let Some(tx) = self
+            .event_tx
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned())
+        {
+            let _ = tx.send(activity_event.clone());
+        }
 
         Ok(())
     }
@@ -364,24 +543,24 @@ impl ActivityQueueTrait for ActivityQueue {
         // Add to sorted set with calculated score
         let _: () = conn.zadd(&queue_key, queue_entry, score).await?;
 
-        // Store activity metadata for tracking
-        let activity_key = format!("activity:{}", activity.id);
-        let _: () = conn
-            .hset_multiple(
-                &activity_key,
-                &[
-                    ("status", serde_json::to_string(&activity.status)?),
-                    ("created_at", activity.created_at.to_rfc3339()),
-                    ("retry_count", activity.retry_count.to_string()),
-                    ("priority", serde_json::to_string(&activity.priority)?),
-                    ("score", score.to_string()),
-                ],
-            )
-            .await?;
+        // Persist snapshot with expanded metadata for observability
+        let mut snapshot = ActivitySnapshot::from_activity(&activity);
+        snapshot.score = Some(score);
+        snapshot.status_updated_at = Self::now();
+        self.write_snapshot(&mut conn, &snapshot).await?;
 
-        // Set TTL for activity metadata (7 days)
-        let days = 7 * 24 * 60 * 60;
-        let _: () = conn.expire(&activity_key, days).await?;
+        // Record lifecycle event
+        self.record_event(
+            &mut conn,
+            &activity.id,
+            ActivityEventType::Enqueued,
+            None,
+            Some(json!({
+                "priority": snapshot.priority,
+                "scheduled_at": snapshot.scheduled_at,
+            })),
+        )
+        .await?;
 
         info!(
             activity_id = %activity.id,
@@ -466,30 +645,51 @@ impl ActivityQueueTrait for ActivityQueue {
                 let mut activity = self.parse_queue_entry(&queue_entry)?;
                 activity.status = ActivityStatus::Running;
 
-                // Update activity status and remember processing member for ack
-                self.update_activity_status(&activity.id, &activity.status)
-                    .await?;
-                let activity_key = format!("activity:{}", activity.id);
-                let _: () = conn
-                    .hset_multiple(
-                        &activity_key,
-                        &[
-                            ("processing_member", queue_entry.as_str()),
-                            (
-                                "lease_deadline_ms",
-                                (now_ms + lease_ms).to_string().as_str(),
-                            ),
-                        ],
-                    )
-                    .await?;
+                let activity_key = self.get_activity_key(&activity.id);
+                let lease_deadline_ms = (now_ms + lease_ms) as i64;
+
+                let meta_fields = vec![
+                    ("processing_member".to_string(), queue_entry.clone()),
+                    (
+                        "lease_deadline_ms".to_string(),
+                        lease_deadline_ms.to_string(),
+                    ),
+                ];
+                let _: () = conn.hset_multiple(&activity_key, &meta_fields).await?;
+
+                let mut snapshot = match self.load_snapshot(&mut conn, &activity.id).await {
+                    Ok(existing) => existing,
+                    Err(_) => ActivitySnapshot::from_activity(&activity),
+                };
+
+                let started_at = Self::now();
+                snapshot.update_status(ActivityStatus::Running, started_at);
+                snapshot.mark_started(started_at);
+                snapshot.lease_deadline_ms = Some(lease_deadline_ms);
+                snapshot.processing_member = Some(queue_entry.clone());
+                snapshot.score =
+                    Some(self.calculate_priority_score(&activity.priority, activity.created_at));
+
+                self.write_snapshot(&mut conn, &snapshot).await?;
+
+                self.record_event(
+                    &mut conn,
+                    &activity.id,
+                    ActivityEventType::Dequeued,
+                    None,
+                    Some(json!({
+                        "lease_deadline_ms": lease_deadline_ms,
+                    })),
+                )
+                .await?;
 
                 // Extend lease if it's less than the timeout
                 if lease_ms / 1000 < activity.timeout_seconds {
-                    let delta = activity.timeout_seconds - (lease_ms / 1000);
-                    if delta > 0 {
-                        self.extend_lease(activity.id, Duration::from_secs(delta))
-                            .await?;
-                    }
+                    // let delta = activity.timeout_seconds - (lease_ms / 1000);
+                    // if delta > 0 {
+                    //     self.extend_lease(activity.id, Duration::from_secs(delta))
+                    //         .await?;
+                    // }
                 }
 
                 debug!(
@@ -509,6 +709,37 @@ impl ActivityQueueTrait for ActivityQueue {
         Ok(None) // Timeout
     }
 
+    async fn assign_worker(
+        &self,
+        activity_id: uuid::Uuid,
+        worker_id: &str,
+    ) -> Result<(), WorkerError> {
+        let mut conn = self.redis_pool.get().await.map_err(|e| {
+            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
+        })?;
+
+        let mut snapshot = self.load_snapshot(&mut conn, &activity_id).await?;
+        let assigned_at = Self::now();
+        if snapshot.started_at.is_none() {
+            snapshot.mark_started(assigned_at);
+        }
+        snapshot.set_current_worker_id(Some(worker_id.to_string()));
+        snapshot.set_last_worker_id(Some(worker_id.to_string()));
+        snapshot.update_status(ActivityStatus::Running, assigned_at);
+
+        self.write_snapshot(&mut conn, &snapshot).await?;
+        self.record_event(
+            &mut conn,
+            &activity_id,
+            ActivityEventType::Started,
+            Some(worker_id),
+            None,
+        )
+        .await?;
+
+        Ok(())
+    }
+
     /// Mark an activity as completed by updating its stored status.
     ///
     /// Updates the activity's status to `Completed` (persisted in Redis) and returns when the update succeeds.
@@ -516,18 +747,51 @@ impl ActivityQueueTrait for ActivityQueue {
     /// # Examples
     ///
     /// ```no_run
-    /// # async fn example(queue: &ActivityQueue) -> Result<(), WorkerError> {
-    /// let activity_id = uuid::Uuid::new_v4();
-    /// queue.mark_completed(activity_id).await?;
+    /// # async fn example(queue: &ActivityQueue, activity: &crate::Activity) -> Result<(), WorkerError> {
+    /// queue.mark_completed(activity, Some("worker-1")).await?;
     /// # Ok(())
     /// # }
     /// ```
-    async fn mark_completed(&self, activity_id: uuid::Uuid) -> Result<(), WorkerError> {
+    async fn mark_completed(
+        &self,
+        activity: &Activity,
+        worker_id: Option<&str>,
+    ) -> Result<(), WorkerError> {
         // Ack from processing first to avoid leaks
-        self.ack_processing(&activity_id).await?;
-        self.update_activity_status(&activity_id, &ActivityStatus::Completed)
-            .await?;
-        info!(activity_id = %activity_id, "Activity marked as completed");
+        self.ack_processing(&activity.id).await?;
+
+        let mut conn = self.redis_pool.get().await.map_err(|e| {
+            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
+        })?;
+
+        let mut snapshot = match self.load_snapshot(&mut conn, &activity.id).await {
+            Ok(s) => s,
+            Err(_) => ActivitySnapshot::from_activity(activity),
+        };
+        let completed_at = Self::now();
+        snapshot.update_status(ActivityStatus::Completed, completed_at);
+        snapshot.mark_completed(completed_at);
+        if let Some(worker) = worker_id {
+            snapshot.set_last_worker_id(Some(worker.to_string()));
+        }
+        snapshot.set_current_worker_id(None);
+        snapshot.processing_member = None;
+        snapshot.lease_deadline_ms = None;
+        snapshot.set_last_error(None, None);
+
+        self.write_snapshot(&mut conn, &snapshot).await?;
+        self.record_event(
+            &mut conn,
+            &activity.id,
+            ActivityEventType::Completed,
+            worker_id,
+            Some(json!({
+                "activity_type": activity.activity_type,
+            })),
+        )
+        .await?;
+
+        info!(activity_id = %activity.id, "Activity marked as completed");
         Ok(())
     }
 
@@ -558,7 +822,9 @@ impl ActivityQueueTrait for ActivityQueue {
     ///     priority: crate::Priority::Normal,
     ///     payload: serde_json::json!({}),
     /// };
-    /// let _ = queue.mark_failed(activity, "transient error".to_string(), true).await;
+    /// let _ = queue
+    ///     .mark_failed(activity, "transient error".to_string(), true, None)
+    ///     .await;
     /// # }
     /// ```
     async fn mark_failed(
@@ -566,15 +832,44 @@ impl ActivityQueueTrait for ActivityQueue {
         activity: Activity,
         error_message: String,
         retryable: bool,
+        worker_id: Option<&str>,
     ) -> Result<(), WorkerError> {
         let activity_id = activity.id;
+
+        let mut conn = self.redis_pool.get().await.map_err(|e| {
+            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
+        })?;
+
+        let mut snapshot = match self.load_snapshot(&mut conn, &activity_id).await {
+            Ok(s) => s,
+            Err(_) => ActivitySnapshot::from_activity(&activity),
+        };
+        let now = Self::now();
+        if let Some(worker) = worker_id {
+            snapshot.set_last_worker_id(Some(worker.to_string()));
+        }
+        snapshot.set_current_worker_id(None);
+        snapshot.processing_member = None;
+        snapshot.lease_deadline_ms = None;
+        snapshot.set_last_error(Some(error_message.clone()), Some(now));
 
         if !retryable {
             // Ack and mark failed
             self.ack_processing(&activity_id).await?;
-            self.update_activity_status(&activity_id, &ActivityStatus::Failed)
-                .await?;
-
+            snapshot.update_status(ActivityStatus::Failed, now);
+            snapshot.mark_completed(now);
+            self.write_snapshot(&mut conn, &snapshot).await?;
+            self.record_event(
+                &mut conn,
+                &activity_id,
+                ActivityEventType::Failed,
+                worker_id,
+                Some(json!({
+                    "retryable": false,
+                    "error": error_message,
+                })),
+            )
+            .await?;
             return Ok(());
         }
 
@@ -593,14 +888,42 @@ impl ActivityQueueTrait for ActivityQueue {
             let retry_count = retry_activity.retry_count;
             // Ack current processing before re-scheduling
             self.ack_processing(&activity_id).await?;
+            snapshot.update_status(ActivityStatus::Retrying, now);
+            snapshot.retry_count = retry_count;
+            snapshot.scheduled_at = Some(scheduled_at);
+            self.write_snapshot(&mut conn, &snapshot).await?;
+            self.record_event(
+                &mut conn,
+                &activity_id,
+                ActivityEventType::Retrying,
+                worker_id,
+                Some(json!({
+                    "retry_count": retry_count,
+                    "scheduled_at": scheduled_at,
+                    "error": error_message,
+                })),
+            )
+            .await?;
             self.schedule_activity(retry_activity).await?;
             info!(activity_id = %activity_id, retry_count = retry_count, "Activity scheduled for retry");
         } else {
             // Move to dead letter queue
             self.ack_processing(&activity_id).await?;
-            self.update_activity_status(&activity_id, &ActivityStatus::DeadLetter)
-                .await?;
-            self.add_to_dead_letter_queue(activity, error_message)
+            snapshot.update_status(ActivityStatus::DeadLetter, now);
+            snapshot.mark_completed(now);
+            self.write_snapshot(&mut conn, &snapshot).await?;
+            let dead_letter_error = error_message.clone();
+            self.record_event(
+                &mut conn,
+                &activity_id,
+                ActivityEventType::DeadLetter,
+                worker_id,
+                Some(json!({
+                    "error": error_message,
+                })),
+            )
+            .await?;
+            self.add_to_dead_letter_queue(activity, dead_letter_error)
                 .await?;
             error!(activity_id = %activity_id, "Activity moved to dead letter queue");
         }
@@ -652,6 +975,30 @@ impl ActivityQueueTrait for ActivityQueue {
         let _: () = conn
             .zadd(scheduled_key, activity_json, scheduled_at)
             .await?;
+
+        let mut snapshot = match self.load_snapshot(&mut conn, &activity.id).await {
+            Ok(s) => s,
+            Err(_) => ActivitySnapshot::from_activity(&activity),
+        };
+        let scheduled_dt = activity.scheduled_at.unwrap_or_else(chrono::Utc::now);
+        snapshot.scheduled_at = Some(scheduled_dt);
+        snapshot.retry_count = activity.retry_count;
+        snapshot.update_status(activity.status.clone(), Self::now());
+        snapshot.set_current_worker_id(None);
+        snapshot.processing_member = None;
+        snapshot.lease_deadline_ms = None;
+        self.write_snapshot(&mut conn, &snapshot).await?;
+        self.record_event(
+            &mut conn,
+            &activity.id,
+            ActivityEventType::Scheduled,
+            None,
+            Some(json!({
+                "scheduled_at": scheduled_dt,
+                "status": activity.status,
+            })),
+        )
+        .await?;
 
         debug!(activity_id = %activity.id, scheduled_at = %scheduled_at, "Activity scheduled");
         Ok(())
@@ -756,7 +1103,7 @@ impl ActivityQueueTrait for ActivityQueue {
         let lua = r#"
         local now = tonumber(ARGV[1])
         local limit = tonumber(ARGV[2])
-        local moved = 0
+        local moved_ids = {}
         local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, limit)
 
         for _, m in ipairs(members) do
@@ -769,18 +1116,16 @@ impl ActivityQueueTrait for ActivityQueue {
             if not score then score = now end
             redis.call('ZADD', KEYS[2], score, m)
             redis.call('HDEL', activity_key, 'processing_member', 'lease_deadline_ms')
-            redis.call('HSET', activity_key, 'status', '\"Pending\"')
+            table.insert(moved_ids, id)
             else
-            -- Fallback if format unexpected
             redis.call('ZADD', KEYS[2], now, m)
             end
-            moved = moved + 1
         end
         end
-        return moved
+        return moved_ids
         "#;
 
-        let moved: i64 = redis::cmd("EVAL")
+        let moved_ids: Vec<String> = redis::cmd("EVAL")
             .arg(lua)
             .arg(2)
             .arg(&processing_key)
@@ -791,7 +1136,29 @@ impl ActivityQueueTrait for ActivityQueue {
             .await
             .map_err(|e| WorkerError::QueueError(format!("requeue_expired EVAL failed: {}", e)))?;
 
-        Ok(moved as u64)
+        for id_str in &moved_ids {
+            if let Ok(activity_id) = uuid::Uuid::parse_str(id_str) {
+                if let Ok(mut snapshot) = self.load_snapshot(&mut conn, &activity_id).await {
+                    let transition_at = Self::now();
+                    snapshot.update_status(ActivityStatus::Pending, transition_at);
+                    snapshot.set_current_worker_id(None);
+                    snapshot.processing_member = None;
+                    snapshot.lease_deadline_ms = None;
+                    self.write_snapshot(&mut conn, &snapshot).await.ok();
+                    self.record_event(
+                        &mut conn,
+                        &activity_id,
+                        ActivityEventType::Requeued,
+                        None,
+                        Some(json!({ "reason": "lease_expired" })),
+                    )
+                    .await
+                    .ok();
+                }
+            }
+        }
+
+        Ok(moved_ids.len() as u64)
     }
 
     /// Extend the lease for an activity in the processing ZSET.
@@ -866,58 +1233,22 @@ impl ActivityQueueTrait for ActivityQueue {
             .await
             .map_err(|e| WorkerError::QueueError(format!("extend_lease EVAL failed: {}", e)))?;
 
+        let mut snapshot = self.load_snapshot(&mut conn, &activity_id).await?;
+        snapshot.lease_deadline_ms = Some(new_deadline);
+        self.write_snapshot(&mut conn, &snapshot).await?;
+        self.record_event(
+            &mut conn,
+            &activity_id,
+            ActivityEventType::LeaseExtended,
+            None,
+            Some(json!({
+                "new_deadline_ms": new_deadline,
+                "extend_by_ms": extend_ms,
+            })),
+        )
+        .await?;
+
         Ok(new_deadline > 0)
-    }
-
-    /// Returns aggregated queue statistics (counts) for the Redis-backed activity queue.
-    ///
-    /// This queries Redis for:
-    /// - total pending activities in the main priority ZSET,
-    /// - per-priority counts computed by ZSET score ranges (Critical/High/Normal/Low),
-    /// - number of scheduled activities in the `scheduled_activities` ZSET,
-    /// - number of entries in the `dead_letter_queue` list.
-    ///
-    /// The priority counts rely on the queue's score layout:
-    /// Critical: 4_000_000–4_999_999, High: 3_000_000–3_999_999, Normal: 2_000_000–2_999_999, Low: 1_000_000–1_999_999.
-    ///
-    /// Returns a `QueueStats` on success, or a `WorkerError::QueueError` if obtaining a Redis connection or executing Redis commands fails.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # async fn run_example(queue: &crate::queue::ActivityQueue) {
-    /// let stats = queue.get_stats().await.unwrap();
-    /// println!("pending: {}", stats.pending_activities);
-    /// # }
-    /// ```
-    async fn get_stats(&self) -> Result<QueueStats, WorkerError> {
-        let mut conn = self.redis_pool.get().await.map_err(|e| {
-            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
-        })?;
-
-        let queue_key = self.get_main_queue_key();
-
-        // Get total pending activities count
-        let total_pending: u64 = conn.zcard(&queue_key).await?;
-
-        // Get count by priority using score ranges
-        let critical_count: u64 = conn.zcount(&queue_key, 4_000_000.0, 4_999_999.0).await?;
-        let high_count: u64 = conn.zcount(&queue_key, 3_000_000.0, 3_999_999.0).await?;
-        let normal_count: u64 = conn.zcount(&queue_key, 2_000_000.0, 2_999_999.0).await?;
-        let low_count: u64 = conn.zcount(&queue_key, 1_000_000.0, 1_999_999.0).await?;
-
-        let scheduled_count: u64 = conn.zcard("scheduled_activities").await?;
-        let dead_letter_count: u64 = conn.llen("dead_letter_queue").await?;
-
-        Ok(QueueStats {
-            pending_activities: total_pending,
-            critical_priority: critical_count,
-            high_priority: high_count,
-            normal_priority: normal_count,
-            low_priority: low_count,
-            scheduled_activities: scheduled_count,
-            dead_letter_activities: dead_letter_count,
-        })
     }
 
     /// Store an activity's result in Redis under the key `result:<activity_id>` with a 24-hour TTL.
@@ -954,10 +1285,20 @@ impl ActivityQueueTrait for ActivityQueue {
         })?;
 
         let result_key = format!("result:{}", activity_id);
-        let result_json = serde_json::to_value(result)?.to_string();
+        let result_value = serde_json::to_value(&result)?;
+        let result_json = result_value.to_string();
 
         // Store result with TTL (24 hours)
         let _: () = conn.set_ex(&result_key, result_json, 86400).await?;
+
+        self.record_event(
+            &mut conn,
+            &activity_id,
+            ActivityEventType::ResultStored,
+            None,
+            Some(result_value),
+        )
+        .await?;
 
         info!(activity_id = %activity_id, "Activity result stored");
         Ok(())
@@ -1003,9 +1344,116 @@ impl ActivityQueueTrait for ActivityQueue {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivitySnapshot {
+    pub id: uuid::Uuid,
+    pub activity_type: String,
+    pub payload: serde_json::Value,
+    pub priority: ActivityPriority,
+    pub status: ActivityStatus,
+    pub created_at: DateTime<Utc>,
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub current_worker_id: Option<String>,
+    pub last_worker_id: Option<String>,
+    pub retry_count: u32,
+    pub max_retries: u32,
+    pub timeout_seconds: u64,
+    pub retry_delay_seconds: u64,
+    pub metadata: HashMap<String, String>,
+    pub last_error: Option<String>,
+    pub last_error_at: Option<DateTime<Utc>>,
+    pub status_updated_at: DateTime<Utc>,
+    pub score: Option<f64>,
+    pub lease_deadline_ms: Option<i64>,
+    pub processing_member: Option<String>,
+}
+
+impl ActivitySnapshot {
+    pub(crate) fn from_activity(activity: &Activity) -> Self {
+        Self {
+            id: activity.id,
+            activity_type: activity.activity_type.clone(),
+            payload: activity.payload.clone(),
+            priority: activity.priority.clone(),
+            status: activity.status.clone(),
+            created_at: activity.created_at,
+            scheduled_at: activity.scheduled_at,
+            started_at: None,
+            completed_at: None,
+            current_worker_id: None,
+            last_worker_id: None,
+            retry_count: activity.retry_count,
+            max_retries: activity.max_retries,
+            timeout_seconds: activity.timeout_seconds,
+            retry_delay_seconds: activity.retry_delay_seconds,
+            metadata: activity.metadata.clone(),
+            last_error: None,
+            last_error_at: None,
+            status_updated_at: Utc::now(),
+            score: None,
+            lease_deadline_ms: None,
+            processing_member: None,
+        }
+    }
+
+    pub fn update_status(&mut self, status: ActivityStatus, timestamp: DateTime<Utc>) {
+        self.status = status;
+        self.status_updated_at = timestamp;
+    }
+
+    pub fn mark_started(&mut self, started_at: DateTime<Utc>) {
+        self.started_at = Some(started_at);
+    }
+
+    pub fn mark_completed(&mut self, completed_at: DateTime<Utc>) {
+        self.completed_at = Some(completed_at);
+    }
+
+    pub fn set_current_worker_id(&mut self, worker_id: Option<String>) {
+        self.current_worker_id = worker_id;
+    }
+
+    pub fn set_last_worker_id(&mut self, worker_id: Option<String>) {
+        self.last_worker_id = worker_id;
+    }
+
+    pub fn set_last_error(&mut self, error: Option<String>, at: Option<DateTime<Utc>>) {
+        self.last_error = error;
+        self.last_error_at = at;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ActivityEventType {
+    Enqueued,
+    Scheduled,
+    Dequeued,
+    Started,
+    Completed,
+    Failed,
+    Retrying,
+    DeadLetter,
+    Requeued,
+    LeaseExtended,
+    ResultStored,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityEvent {
+    pub activity_id: uuid::Uuid,
+    pub timestamp: DateTime<Utc>,
+    pub event_type: ActivityEventType,
+    pub worker_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueStats {
     pub pending_activities: u64,
+    pub processing_activities: u64,
     pub critical_priority: u64,
     pub high_priority: u64,
     pub normal_priority: u64,
