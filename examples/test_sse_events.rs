@@ -16,7 +16,7 @@ impl ActivityHandler for TestActivity {
         _ctx: ActivityContext,
     ) -> ActivityHandlerResult {
         println!("🔄 Processing test activity: {:?}", payload);
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         println!("✅ Completed test activity");
         Ok(Some(serde_json::json!({"status": "completed"})))
     }
@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             counter += 1;
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
 

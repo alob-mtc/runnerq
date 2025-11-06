@@ -967,6 +967,42 @@
             align-items: center;
         }
 
+        .limit-group {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+            margin-left: auto;
+        }
+
+        .limit-label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .limit-custom-input {
+            width: 80px;
+            padding: 0.5rem 0.75rem;
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            font-family: inherit;
+            transition: border-color 0.2s;
+            display: none;
+        }
+
+        .limit-custom-input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .limit-custom-input.visible {
+            display: block;
+        }
+
         .search-input {
             flex: 1;
             min-width: 250px;
@@ -1181,6 +1217,11 @@
                 width: 100%;
             }
 
+            .limit-group {
+                width: 100%;
+                margin-left: 0;
+            }
+
             .activity-table th,
             .activity-table td {
                 padding: 0.75rem 1rem;
@@ -1264,6 +1305,14 @@
                 gap: 0.75rem;
             }
 
+            .limit-group {
+                flex-wrap: wrap;
+            }
+
+            .limit-custom-input {
+                width: 100%;
+            }
+
             .activity-id {
                 font-size: 0.7rem;
                 word-break: break-all;
@@ -1306,6 +1355,23 @@
                     <option value="DeadLetter">Dead Letter</option>
                 </select>
                 <button class="clear-filters-btn" id="clear-filters">Clear Filters</button>
+                <div class="limit-group">
+                    <span class="limit-label">Show:</span>
+                    <select class="filter-select" id="limit-select" style="width: auto; min-width: 100px;">
+                        <option value="10">10</option>
+                        <option value="50" selected>50</option>
+                        <option value="100">100</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                    <input 
+                        type="number" 
+                        class="limit-custom-input" 
+                        id="limit-custom-input" 
+                        placeholder="Enter limit"
+                        min="1"
+                        max="1000"
+                    >
+                </div>
             </div>
             
             <!-- Stats Overview -->
@@ -1438,6 +1504,7 @@
         let filterStatus = '';
         let sortColumn = 'created_at';
         let sortDirection = 'desc';
+        let activityLimit = parseInt(localStorage.getItem('runnerq_activity_limit') || '50', 10);
 
         // Utility Functions
         const formatDate = (isoString) => {
@@ -1569,7 +1636,7 @@
             try {
                 showLoadingSkeleton();
                 
-                const data = await fetchJSON(`${API_BASE}/activities/${collection}?limit=50`);
+                const data = await fetchJSON(`${API_BASE}/activities/${collection}?limit=${activityLimit}`);
                 activities = data;
                 
                 // Update activity types for filter dropdown
@@ -2148,7 +2215,7 @@
         // Silent reload without loading skeleton
         const loadActivitiesQuiet = async (collection) => {
             try {
-                const data = await fetchJSON(`${API_BASE}/activities/${collection}?limit=50`);
+                const data = await fetchJSON(`${API_BASE}/activities/${collection}?limit=${activityLimit}`);
                 activities = data;
                 
                 // Update activity types for filter dropdown
@@ -2231,6 +2298,57 @@
                 filterType = '';
                 filterStatus = '';
                 applyFilters();
+            });
+
+            // Setup limit selector
+            const limitSelect = document.getElementById('limit-select');
+            const limitCustomInput = document.getElementById('limit-custom-input');
+
+            // Initialize limit selector with saved value
+            const savedLimit = localStorage.getItem('runnerq_activity_limit') || '50';
+            if (['10', '50', '100'].includes(savedLimit)) {
+                limitSelect.value = savedLimit;
+            } else {
+                limitSelect.value = 'custom';
+                limitCustomInput.value = savedLimit;
+                limitCustomInput.classList.add('visible');
+            }
+
+            limitSelect.addEventListener('change', (e) => {
+                const value = e.target.value;
+                if (value === 'custom') {
+                    limitCustomInput.classList.add('visible');
+                    limitCustomInput.focus();
+                    // Use current value if custom input has one
+                    if (limitCustomInput.value) {
+                        activityLimit = parseInt(limitCustomInput.value, 10) || 50;
+                        localStorage.setItem('runnerq_activity_limit', activityLimit.toString());
+                        loadActivities(currentCollection);
+                    }
+                } else {
+                    limitCustomInput.classList.remove('visible');
+                    activityLimit = parseInt(value, 10);
+                    localStorage.setItem('runnerq_activity_limit', value);
+                    loadActivities(currentCollection);
+                }
+            });
+
+            limitCustomInput.addEventListener('change', (e) => {
+                const value = parseInt(e.target.value, 10);
+                if (value > 0 && value <= 1000) {
+                    activityLimit = value;
+                    localStorage.setItem('runnerq_activity_limit', value.toString());
+                    loadActivities(currentCollection);
+                } else {
+                    // Reset to last valid value
+                    e.target.value = activityLimit;
+                }
+            });
+
+            limitCustomInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    e.target.blur(); // Trigger change event
+                }
             });
 
             // Initial load
