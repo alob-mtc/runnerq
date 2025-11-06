@@ -1888,28 +1888,81 @@
             panel.className = 'detail-panel slide-in';
 
             // Input display
+            // Input section - create DOM elements safely
             const inputData = activity.input || activity.payload || null;
-            const inputHtml = inputData
-                ? `<div class="section-header-with-action">
-                    <h3>Input</h3>
-                    <button class="copy-btn" onclick="copyToClipboard('input-${activity.id}', this)">
-                        📋 Copy
-                    </button>
-                   </div>
-                   <pre class="data-display" id="input-${activity.id}">${JSON.stringify(inputData, null, 2)}</pre>`
-                : `<h3>Input</h3><div class="empty-data">No input data</div>`;
+            const createInputSection = () => {
+                const section = document.createElement('div');
+                if (inputData) {
+                    const header = document.createElement('div');
+                    header.className = 'section-header-with-action';
+                    
+                    const h3 = document.createElement('h3');
+                    h3.textContent = 'Input';
+                    
+                    const copyBtn = document.createElement('button');
+                    copyBtn.className = 'copy-btn';
+                    copyBtn.textContent = '📋 Copy';
+                    copyBtn.onclick = function() { copyToClipboard('input-' + activity.id, this); };
+                    
+                    header.appendChild(h3);
+                    header.appendChild(copyBtn);
+                    
+                    const pre = document.createElement('pre');
+                    pre.className = 'data-display';
+                    pre.id = 'input-' + activity.id;
+                    pre.textContent = JSON.stringify(inputData, null, 2);
+                    
+                    section.appendChild(header);
+                    section.appendChild(pre);
+                } else {
+                    const h3 = document.createElement('h3');
+                    h3.textContent = 'Input';
+                    const emptyDiv = document.createElement('div');
+                    emptyDiv.className = 'empty-data';
+                    emptyDiv.textContent = 'No input data';
+                    section.appendChild(h3);
+                    section.appendChild(emptyDiv);
+                }
+                return section;
+            };
 
-            // Results display - check the result parameter first, then activity fields
+            // Results section - create DOM elements safely
             const resultData = result?.data || activity.result || activity.output || null;
-            const resultHtml = resultData
-                ? `<div class="section-header-with-action">
-                    <h3>Results</h3>
-                    <button class="copy-btn" onclick="copyToClipboard('result-${activity.id}', this)">
-                        📋 Copy
-                    </button>
-                   </div>
-                   <pre class="data-display" id="result-${activity.id}">${JSON.stringify(resultData, null, 2)}</pre>`
-                : `<h3>Results</h3><div class="empty-data">No results yet</div>`;
+            const createResultSection = () => {
+                const section = document.createElement('div');
+                if (resultData) {
+                    const header = document.createElement('div');
+                    header.className = 'section-header-with-action';
+                    
+                    const h3 = document.createElement('h3');
+                    h3.textContent = 'Results';
+                    
+                    const copyBtn = document.createElement('button');
+                    copyBtn.className = 'copy-btn';
+                    copyBtn.textContent = '📋 Copy';
+                    copyBtn.onclick = function() { copyToClipboard('result-' + activity.id, this); };
+                    
+                    header.appendChild(h3);
+                    header.appendChild(copyBtn);
+                    
+                    const pre = document.createElement('pre');
+                    pre.className = 'data-display';
+                    pre.id = 'result-' + activity.id;
+                    pre.textContent = JSON.stringify(resultData, null, 2);
+                    
+                    section.appendChild(header);
+                    section.appendChild(pre);
+                } else {
+                    const h3 = document.createElement('h3');
+                    h3.textContent = 'Results';
+                    const emptyDiv = document.createElement('div');
+                    emptyDiv.className = 'empty-data';
+                    emptyDiv.textContent = 'No results yet';
+                    section.appendChild(h3);
+                    section.appendChild(emptyDiv);
+                }
+                return section;
+            };
 
             const metadataHtml = Object.keys(activity.metadata || {}).length > 0
                 ? `<ul class="metadata-list">
@@ -2014,13 +2067,9 @@
 
                 ${errorHtml}
 
-                <div class="detail-section">
-                    ${inputHtml}
-                </div>
+                <div class="detail-section" id="input-section-container"></div>
 
-                <div class="detail-section">
-                    ${resultHtml}
-                </div>
+                <div class="detail-section" id="result-section-container"></div>
 
                 <div class="detail-section">
                     <h3>Metadata</h3>
@@ -2032,6 +2081,20 @@
                     ${eventsHtml}
                 </div>
             `;
+            
+            // Safely append input and result sections using DOM APIs
+            const inputContainer = document.getElementById('input-section-container');
+            const resultContainer = document.getElementById('result-section-container');
+            
+            if (inputContainer) {
+                const inputSection = createInputSection();
+                inputContainer.appendChild(inputSection);
+            }
+            
+            if (resultContainer) {
+                const resultSection = createResultSection();
+                resultContainer.appendChild(resultSection);
+            }
         };
 
         const clearDetailPanel = () => {
@@ -2055,10 +2118,10 @@
                     ${events.map(event => `
                         <li class="timeline-item ${event.event_type}">
                             <div class="timeline-header">
-                                <span class="timeline-type">${event.event_type}</span>
+                                <span class="timeline-type">${escapeHtml(event.event_type)}</span>
                                 <span class="timeline-time">${formatRelativeTime(event.timestamp)}</span>
                             </div>
-                            ${event.worker_id ? `<div class="timeline-worker">Worker: ${event.worker_id}</div>` : ''}
+                            ${event.worker_id ? `<div class="timeline-worker">Worker: ${escapeHtml(event.worker_id)}</div>` : ''}
                         </li>
                     `).join('')}
                 </ol>`;
@@ -2079,8 +2142,8 @@
                         
                         return `
                         <div class="timeline-bar-container">
-                            <div class="timeline-bar ${barClass}" style="width: ${width}px;" title="${event.event_type} at ${formatDate(event.timestamp)}">
-                                ${event.event_type}
+                            <div class="timeline-bar ${barClass}" style="width: ${width}px;" title="${escapeHtml(event.event_type + ' at ' + formatDate(event.timestamp))}">
+                                ${escapeHtml(event.event_type)}
                             </div>
                             <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">
                                 ${formatRelativeTime(event.timestamp)}
@@ -2095,11 +2158,11 @@
                     ${events.map(event => `
                         <li class="timeline-item ${event.event_type}">
                             <div class="timeline-header">
-                                <span class="timeline-type">${event.event_type}</span>
+                                <span class="timeline-type">${escapeHtml(event.event_type)}</span>
                                 <span class="timeline-time">${formatDate(event.timestamp)}</span>
                             </div>
-                            ${event.worker_id ? `<div class="timeline-worker">Worker: ${event.worker_id}</div>` : ''}
-                            ${event.detail ? `<pre class="timeline-detail">${JSON.stringify(event.detail, null, 2)}</pre>` : ''}
+                            ${event.worker_id ? `<div class="timeline-worker">Worker: ${escapeHtml(event.worker_id)}</div>` : ''}
+                            ${event.detail ? `<pre class="timeline-detail">${escapeHtml(JSON.stringify(event.detail, null, 2))}</pre>` : ''}
                         </li>
                     `).join('')}
                 </ol>`;
@@ -2410,6 +2473,44 @@
                 }, 2000);
             } catch (err) {
                 console.error('Failed to copy:', err);
+            }
+        };
+
+        // Filter by status function
+        const filterByStatus = (status) => {
+            if (!status) return;
+            
+            // Map status to collection
+            const statusToCollection = {
+                'running': 'processing',
+                'processing': 'processing',
+                'started': 'processing',
+                'dequeued': 'processing',
+                'pending': 'pending',
+                'enqueued': 'pending',
+                'queued': 'pending',
+                'completed': 'completed',
+                'success': 'completed',
+                'succeeded': 'completed',
+                'failed': 'dead_letter',
+                'error': 'dead_letter',
+                'dead_letter': 'dead_letter',
+                'deadletter': 'dead_letter',
+                'scheduled': 'scheduled',
+                'scheduled_future': 'scheduled'
+            };
+            
+            // Normalize status to lowercase for lookup
+            const normalizedStatus = status.toLowerCase().trim();
+            const collection = statusToCollection[normalizedStatus];
+            
+            // If we found a matching collection, switch to it
+            if (collection) {
+                switchCollection(collection);
+            } else {
+                // Gracefully handle unknown status - default to pending
+                console.warn(`Unknown status "${status}", defaulting to pending collection`);
+                switchCollection('pending');
             }
         };
 

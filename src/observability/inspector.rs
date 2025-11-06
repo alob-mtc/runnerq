@@ -131,7 +131,7 @@ impl QueueInspector {
     ) -> Result<Vec<ActivitySnapshot>, WorkerError> {
         let mut conn = self.connection().await?;
         let completed_key = self.completed_activities_key();
-        
+
         // Use ZREVRANGE to get completed activities in reverse chronological order (most recent first)
         // This is O(log(N)+M) where N is total items and M is the number we're retrieving
         let range = self.slice_to_range(offset, limit);
@@ -139,7 +139,7 @@ impl QueueInspector {
             .zrevrange(&completed_key, *range.start(), *range.end())
             .await
             .map_err(Self::map_redis_error)?;
-        
+
         let mut snapshots = Vec::with_capacity(members.len());
         for member in members {
             if let Ok(activity_id) = Uuid::parse_str(&member) {
@@ -148,7 +148,7 @@ impl QueueInspector {
                 }
             }
         }
-        
+
         Ok(snapshots)
     }
 

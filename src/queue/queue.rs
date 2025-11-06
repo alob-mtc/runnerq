@@ -302,18 +302,20 @@ impl ActivityQueue {
         let completed_key = self.get_completed_activities_key();
         let score = completed_at.timestamp();
         let member = activity_id.to_string();
-        
+
         let _: () = conn
             .zadd(&completed_key, &member, score)
             .await
-            .map_err(|e| WorkerError::QueueError(format!("Failed to add to completed set: {}", e)))?;
-        
+            .map_err(|e| {
+                WorkerError::QueueError(format!("Failed to add to completed set: {}", e))
+            })?;
+
         // Set expiry on the completed set to 7 days (if not already set)
         let ttl: i64 = conn
             .ttl(&completed_key)
             .await
             .map_err(|e| WorkerError::QueueError(format!("Failed to check TTL: {}", e)))?;
-        
+
         if ttl == -1 {
             // No expiry set, set it to 7 days
             let _: () = conn
@@ -321,7 +323,7 @@ impl ActivityQueue {
                 .await
                 .map_err(|e| WorkerError::QueueError(format!("Failed to set expiry: {}", e)))?;
         }
-        
+
         Ok(())
     }
 
@@ -499,10 +501,7 @@ impl ActivityQueue {
 
         let dead_letter_key = self.get_dead_letter_queue_key();
         let _: () = conn
-            .rpush(
-                &dead_letter_key,
-                serde_json::to_string(&dead_letter_entry)?,
-            )
+            .rpush(&dead_letter_key, serde_json::to_string(&dead_letter_entry)?)
             .await?;
 
         Ok(())
@@ -828,10 +827,11 @@ impl ActivityQueueTrait for ActivityQueue {
         snapshot.set_last_error(None, None);
 
         self.write_snapshot(&mut conn, &snapshot).await?;
-        
+
         // Add to completed activities sorted set for efficient querying
-        self.add_to_completed_set(&mut conn, &activity.id, completed_at).await?;
-        
+        self.add_to_completed_set(&mut conn, &activity.id, completed_at)
+            .await?;
+
         self.record_event(
             &mut conn,
             &activity.id,
