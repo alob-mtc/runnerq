@@ -911,6 +911,8 @@ impl ActivityQueueTrait for ActivityQueue {
             snapshot.update_status(ActivityStatus::Failed, now);
             snapshot.mark_completed(now);
             self.write_snapshot(&mut conn, &snapshot).await?;
+            // Add to completed set so it appears in completed section
+            self.add_to_completed_set(&mut conn, &activity_id, now).await?;
             self.record_event(
                 &mut conn,
                 &activity_id,
@@ -964,6 +966,8 @@ impl ActivityQueueTrait for ActivityQueue {
             snapshot.update_status(ActivityStatus::DeadLetter, now);
             snapshot.mark_completed(now);
             self.write_snapshot(&mut conn, &snapshot).await?;
+            // Add to completed set so it appears in completed section
+            self.add_to_completed_set(&mut conn, &activity_id, now).await?;
             let dead_letter_error = error_message.clone();
             self.record_event(
                 &mut conn,
