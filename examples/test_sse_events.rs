@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let mut engine = WorkerEngine::builder()
         .redis_url(&redis_url)
         .queue_name("test_sse")
-        .max_workers(2)
+        .max_workers(5)
         .build()
         .await?;
 
@@ -79,6 +79,18 @@ async fn main() -> anyhow::Result<()> {
 
         let mut counter = 1;
         loop {
+            if counter < 10 {
+                let _ = executor
+                    .activity("test_activity")
+                    .payload(serde_json::json!({
+                        "test": true,
+                        "counter": counter,
+                        "timestamp": chrono::Utc::now().to_rfc3339()
+                    }))
+                    .delay(Duration::from_secs(30))
+                    .execute()
+                    .await;
+            }
             println!("\n📤 Enqueueing test activity #{}", counter);
             match executor
                 .activity("test_activity")

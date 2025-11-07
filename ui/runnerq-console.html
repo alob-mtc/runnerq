@@ -2201,7 +2201,16 @@
         // Event Handlers
         const selectActivity = (activityId) => {
             selectedActivityId = activityId;
-            renderActivityTable(filteredActivities);
+            
+            // Update selected state without re-rendering entire table
+            document.querySelectorAll('.activity-table tbody tr').forEach(row => {
+                if (row.dataset.activityId === activityId) {
+                    row.classList.add('selected');
+                } else {
+                    row.classList.remove('selected');
+                }
+            });
+            
             loadActivityDetail(activityId);
         };
 
@@ -2290,9 +2299,21 @@
                 // Determine which collection this event affects
                 const eventCollection = getCollectionForEvent(event);
                 
-                // Only refresh if viewing the affected collection
+                // Refresh if viewing the destination collection
                 if (eventCollection === currentCollection) {
-                    // Use a debounced reload to avoid multiple rapid reloads
+                    debouncedReloadActivities();
+                }
+                
+                // Also refresh if the activity moved OUT of the current collection
+                // For example: Completed event should remove from 'processing'
+                const shouldRefreshCurrent = 
+                    (event.event_type === 'Completed' && currentCollection === 'processing') ||
+                    (event.event_type === 'Failed' && currentCollection === 'processing') ||
+                    (event.event_type === 'DeadLetter' && currentCollection === 'processing') ||
+                    (event.event_type === 'Started' && currentCollection === 'pending') ||
+                    (event.event_type === 'Scheduled' && currentCollection === 'processing');
+                
+                if (shouldRefreshCurrent) {
                     debouncedReloadActivities();
                 }
             }
