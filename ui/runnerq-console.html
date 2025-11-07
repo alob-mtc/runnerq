@@ -1819,19 +1819,26 @@
                 } else if (currentCollection === 'completed') {
                     emptyMessage = 'No completed activities found';
                     emptyIcon = '✅';
+                } else if (currentCollection === 'scheduled') {
+                    emptyMessage = 'No scheduled activities';
+                    emptyIcon = '📅';
                 } else if (currentCollection === 'dead_letter') {
                     emptyMessage = 'No activities in dead letter queue';
                     emptyIcon = '✨';
                 }
+                
+                let emptyDescription = searchTerm || filterType 
+                    ? 'Try adjusting your search or filter criteria'
+                    : currentCollection === 'scheduled'
+                    ? 'Activities scheduled for future execution will appear here'
+                    : 'Activities will appear here when they are enqueued';
                 
                 container.innerHTML = `
                     <div class="empty-state fade-in">
                         <div class="empty-state-icon">${emptyIcon}</div>
                         <div class="empty-state-title">${emptyMessage}</div>
                         <div class="empty-state-description">
-                            ${searchTerm || filterType 
-                                ? 'Try adjusting your search or filter criteria' 
-                                : 'Activities will appear here when they are enqueued'}
+                            ${emptyDescription}
                         </div>
                     </div>
                 `;
@@ -2292,7 +2299,7 @@
             
             // For real-time updates, we only do a full reload for certain critical events
             // or if the activity might have moved between collections
-            const criticalEvents = ['Enqueued', 'DeadLetter', 'Completed', 'Failed'];
+            const criticalEvents = ['Enqueued', 'Requeued', 'DeadLetter', 'Completed', 'Failed', 'Scheduled', 'Retrying', 'Started'];
             const shouldReload = criticalEvents.includes(event.event_type);
             
             if (shouldReload) {
@@ -2310,8 +2317,10 @@
                     (event.event_type === 'Completed' && currentCollection === 'processing') ||
                     (event.event_type === 'Failed' && currentCollection === 'processing') ||
                     (event.event_type === 'DeadLetter' && currentCollection === 'processing') ||
-                    (event.event_type === 'Started' && currentCollection === 'pending') ||
-                    (event.event_type === 'Scheduled' && currentCollection === 'processing');
+                    (event.event_type === 'Started' && (currentCollection === 'pending' || currentCollection === 'scheduled')) ||
+                    (event.event_type === 'Scheduled' && currentCollection === 'processing') ||
+                    (event.event_type === 'Retrying' && currentCollection === 'processing') ||
+                    (event.event_type === 'Requeued' && currentCollection === 'dead_letter');
                 
                 if (shouldRefreshCurrent) {
                     debouncedReloadActivities();

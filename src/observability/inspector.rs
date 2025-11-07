@@ -82,11 +82,30 @@ impl QueueInspector {
         let mut conn = self.connection().await?;
         let range = self.slice_to_range(offset, limit);
         let scheduled_key = self.scheduled_activities_key();
-        let members: Vec<String> = conn
+        let activity_jsons: Vec<String> = conn
             .zrange(&scheduled_key, *range.start(), *range.end())
             .await
             .map_err(Self::map_redis_error)?;
-        self.collect_snapshots(&mut conn, &members).await
+
+        // Scheduled activities are stored as full Activity JSON objects, not uuid:json format
+        let mut snapshots = Vec::with_capacity(activity_jsons.len());
+        for activity_json in activity_jsons {
+            match serde_json::from_str::<Activity>(&activity_json) {
+                Ok(activity) => {
+                    // Try to load the snapshot first (which has the latest status)
+                    let snapshot = match self.load_snapshot(&mut conn, &activity.id).await? {
+                        Some(s) => s,
+                        None => ActivitySnapshot::from_activity(&activity),
+                    };
+                    snapshots.push(snapshot);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to parse scheduled activity JSON");
+                }
+            }
+        }
+
+        Ok(snapshots)
     }
 
     pub async fn list_dead_letter(
