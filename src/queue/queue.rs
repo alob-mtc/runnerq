@@ -57,11 +57,6 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
     /// Requeue expired processing items back to main queue (reaper)
     async fn requeue_expired(&self, max_to_process: usize) -> Result<u64, WorkerError>;
 
-    /// Check if an idempotency key exists and return the existing activity_id.
-    ///
-    /// Returns `Ok(Some(activity_id))` if the key exists, `Ok(None)` if it doesn't.
-    async fn check_idempotency_key(&self, key: &str) -> Result<Option<uuid::Uuid>, WorkerError>;
-
     /// Evaluate idempotency rules for an activity using atomic operations.
     ///
     /// This method is thread-safe and uses atomic Redis operations to prevent race conditions.
@@ -1601,14 +1596,6 @@ impl ActivityQueueTrait for ActivityQueue {
             }
             None => Ok(None),
         }
-    }
-
-    async fn check_idempotency_key(&self, key: &str) -> Result<Option<uuid::Uuid>, WorkerError> {
-        let mut conn = self.redis_pool.get().await.map_err(|e| {
-            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
-        })?;
-
-        self.check_idempotency(&mut conn, key).await
     }
 
     async fn evaluate_idempotency_rule(
