@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
                     "counter": counter,
                     "timestamp": chrono::Utc::now().to_rfc3339()
                 }))
+                .idempotency_key("key", runner_q::OnDuplicate::ReturnExisting)
                 .execute()
                 .await
             {

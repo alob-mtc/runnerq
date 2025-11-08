@@ -218,6 +218,6 @@ pub use crate::runner::runner::{
 };
 pub use activity::activity::{
     ActivityContext, ActivityFuture, ActivityHandler, ActivityHandlerResult, ActivityPriority,
-    ActivityStatus,
+    ActivityStatus, OnDuplicate,
 };
 pub use activity::error::{ActivityError, RetryableError};

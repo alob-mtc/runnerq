@@ -1,6 +1,6 @@
 use crate::activity::activity::{
     Activity, ActivityFuture, ActivityHandler, ActivityHandlerRegistry, ActivityOption,
-    ActivityPriority,
+    ActivityPriority, OnDuplicate,
 };
 use crate::config::WorkerConfig;
 use crate::observability::QueueInspector;
@@ -41,7 +41,7 @@ use tracing::{debug, error, info, warn};
 ///     fn inc_counter(&self, name: &str, value: u64) {
 ///         // Increment the appropriate counter based on name
 ///     }
-///     
+///
 ///     fn observe_duration(&self, name: &str, duration: Duration) {
 ///         // Record the duration in the appropriate histogram
 ///     }
@@ -54,7 +54,7 @@ use tracing::{debug, error, info, warn};
 ///     fn inc_counter(&self, name: &str, value: u64) {
 ///         println!("METRIC: {} += {}", name, value);
 ///     }
-///     
+///
 ///     fn observe_duration(&self, name: &str, duration: Duration) {
 ///         println!("METRIC: {} = {:?}", name, duration);
 ///     }
@@ -870,7 +870,7 @@ impl WorkerEngine {
     ///         println!("Sending email: {:?}", payload);
     ///         Ok(Some(serde_json::json!({"status": "sent"})))
     ///     }
-    ///     
+    ///
     ///     fn activity_type(&self) -> String {
     ///         "send_email".to_string()
     ///     }
@@ -918,7 +918,7 @@ impl WorkerEngine {
     /// impl ActivityHandler for OrderProcessingHandler {
     ///     async fn handle(&self, payload: Value, context: ActivityContext) -> ActivityHandlerResult {
     ///         let order_id = payload["order_id"].as_str().unwrap();
-    ///         
+    ///
     ///         // Execute payment processing activity
     ///         let payment_future = context.activity_executor.execute_activity(
     ///             "process_payment".to_string(),
@@ -930,21 +930,21 @@ impl WorkerEngine {
     ///                 delay_seconds: None,
     ///             })
     ///         ).await?;
-    ///         
+    ///
     ///         // Execute inventory update activity
     ///         let inventory_future = context.activity_executor.execute_activity(
     ///             "update_inventory".to_string(),
     ///             serde_json::json!({"order_id": order_id, "items": payload["items"]}),
     ///             None // Use default options
     ///         ).await?;
-    ///         
+    ///
     ///         Ok(Some(serde_json::json!({
     ///             "order_id": order_id,
     ///             "status": "processing",
     ///             "sub_activities": ["payment", "inventory"]
     ///         })))
     ///     }
-    ///     
+    ///
     ///     fn activity_type(&self) -> String {
     ///         "process_order".to_string()
     ///     }
@@ -1153,6 +1153,7 @@ pub struct ActivityBuilder<'a> {
     max_retries: Option<u32>,
     timeout: Option<Duration>,
     delay: Option<Duration>,
+    idempotency_key: Option<(String, OnDuplicate)>,
 }
 
 impl<'a> ActivityBuilder<'a> {
@@ -1166,6 +1167,7 @@ impl<'a> ActivityBuilder<'a> {
             max_retries: None,
             timeout: None,
             delay: None,
+            idempotency_key: None,
         }
     }
 
@@ -1219,6 +1221,40 @@ impl<'a> ActivityBuilder<'a> {
         self
     }
 
+    /// Sets the idempotency key and behavior for duplicate detection.
+    ///
+    /// When an activity with the same idempotency key already exists, the behavior
+    /// determines how the system handles the duplicate:
+    /// - `AllowReuse`: Always create new activity, updating idempotency record
+    /// - `ReturnExisting`: Return existing ActivityFuture if key exists
+    /// - `AllowReuseOnFailure`: Only allow new activity if previous one failed
+    /// - `NoReuse`: Return error if key exists
+    ///
+    /// The idempotency record TTL (1 day by default).
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - Idempotency key string
+    /// * `behavior` - Behavior when duplicate is detected
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use runner_q::{OnDuplicate, ActivityPriority};
+    ///
+    /// // Return existing ActivityFuture if key exists
+    /// executor
+    ///     .activity("process_payment")
+    ///     .payload(payload)
+    ///     .idempotency_key("payment-order-123", OnDuplicate::ReturnExisting)
+    ///     .execute()
+    ///     .await?;
+    /// ```
+    pub fn idempotency_key(mut self, key: impl Into<String>, behavior: OnDuplicate) -> Self {
+        self.idempotency_key = Some((key.into(), behavior));
+        self
+    }
+
     /// Executes the activity with the configured settings.
     ///
     /// # Returns
@@ -1238,12 +1274,19 @@ impl<'a> ActivityBuilder<'a> {
             || self.max_retries.is_some()
             || self.timeout.is_some()
             || self.delay.is_some()
+            || self.idempotency_key.is_some()
         {
+            let idempotency_key = self.idempotency_key.unwrap();
+            let idempotency_key = (
+                format!("{}-{}", idempotency_key.0, self.activity_type),
+                idempotency_key.1,
+            );
             Some(ActivityOption {
                 priority: self.priority,
                 max_retries: self.max_retries.unwrap_or(3),
                 timeout_seconds: self.timeout.map(|d| d.as_secs()).unwrap_or(300),
                 delay_seconds: self.delay.map(|d| d.as_secs()),
+                idempotency_key: Some(idempotency_key),
             })
         } else {
             None
@@ -1359,6 +1402,21 @@ impl WorkerEngineWrapper {
     ) -> Result<ActivityFuture, WorkerError> {
         let activity = Activity::new(activity_type, payload, option);
         let activity_id = activity.id;
+
+        // Evaluate idempotency rules early, before enqueueing
+        if let Some(existing_id) = self
+            .activity_queue
+            .evaluate_idempotency_rule(&activity)
+            .await?
+        {
+            // ReturnExisting behavior: return the existing ActivityFuture
+            return Ok(ActivityFuture::new(
+                self.activity_queue.clone(),
+                existing_id,
+            ));
+        }
+
+        // Proceed with enqueueing the new activity
         match activity.scheduled_at {
             None => self.activity_queue.enqueue(activity).await?,
             Some(_) => self.activity_queue.schedule_activity(activity).await?,

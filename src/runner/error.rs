@@ -39,6 +39,12 @@ pub enum WorkerError {
     #[error("Activity scheduling error: {0}")]
     SchedulingError(String),
 
+    #[error("Duplicate activity detected: {0}")]
+    DuplicateActivity(String),
+
+    #[error("Idempotency key conflict: {0}")]
+    IdempotencyConflict(String),
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
