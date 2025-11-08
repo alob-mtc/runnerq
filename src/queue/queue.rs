@@ -1,6 +1,6 @@
 use crate::worker::WorkerError;
 use crate::{
-    activity::activity::{Activity, ActivityStatus},
+    activity::activity::{Activity, ActivityStatus, OnDuplicate},
     ActivityPriority,
 };
 use async_trait::async_trait;
@@ -57,6 +57,25 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
     /// Requeue expired processing items back to main queue (reaper)
     async fn requeue_expired(&self, max_to_process: usize) -> Result<u64, WorkerError>;
 
+    /// Check if an idempotency key exists and return the existing activity_id.
+    ///
+    /// Returns `Ok(Some(activity_id))` if the key exists, `Ok(None)` if it doesn't.
+    async fn check_idempotency_key(&self, key: &str) -> Result<Option<uuid::Uuid>, WorkerError>;
+
+    /// Evaluate idempotency rules for an activity using atomic operations.
+    ///
+    /// This method is thread-safe and uses atomic Redis operations to prevent race conditions.
+    /// It should be called early in the activity execution flow, before enqueueing.
+    ///
+    /// Returns:
+    /// - `Ok(None)` if the activity should proceed with enqueue
+    /// - `Ok(Some(existing_id))` if `ReturnExisting` behavior is used and an existing activity was found
+    /// - `Err(...)` if there was an error or conflict
+    async fn evaluate_idempotency_rule(
+        &self,
+        activity: &Activity,
+    ) -> Result<Option<uuid::Uuid>, WorkerError>;
+
     #[allow(dead_code)]
     /// Extend the lease for an activity in the processing ZSET.
     async fn extend_lease(
@@ -106,6 +125,7 @@ pub struct ActivityQueue {
 
 impl ActivityQueue {
     const SNAPSHOT_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
+    const IDEMPOTENCY_KEY_TTL_SECONDS: i64 = 24 * 60 * 60;
     const EVENT_TTL_SECONDS: i64 = Self::SNAPSHOT_TTL_SECONDS;
     const EVENT_MAX_LEN: isize = 200;
 
@@ -192,6 +212,10 @@ impl ActivityQueue {
 
     fn get_activity_events_key(&self, activity_id: &uuid::Uuid) -> String {
         format!("activity:{}:events", activity_id)
+    }
+
+    fn get_idempotency_key(&self, key: &str) -> String {
+        format!("{}:idempotency:{}", self.queue_name, key)
     }
 
     fn now() -> DateTime<Utc> {
@@ -327,6 +351,180 @@ impl ActivityQueue {
         Ok(())
     }
 
+    /// Check if an idempotency key exists and return the existing activity_id.
+    ///
+    /// Returns `Ok(Some(activity_id))` if the key exists, `Ok(None)` if it doesn't.
+    async fn check_idempotency(
+        &self,
+        conn: &mut PooledConnection<'_, RedisConnectionManager>,
+        key: &str,
+    ) -> Result<Option<uuid::Uuid>, WorkerError> {
+        let idempotency_key = self.get_idempotency_key(key);
+        let activity_id_str: Option<String> = conn.get(&idempotency_key).await?;
+
+        if let Some(id_str) = activity_id_str {
+            let activity_id = uuid::Uuid::parse_str(&id_str).map_err(|e| {
+                WorkerError::QueueError(format!("Invalid activity_id in idempotency record: {}", e))
+            })?;
+            Ok(Some(activity_id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Store an idempotency record mapping key to activity_id with TTL.
+    ///
+    /// The record stores only the activity_id (as a string), and expires after the specified TTL.
+    /// The activity status is checked directly from the activity snapshot when needed.
+    async fn store_idempotency_record(
+        &self,
+        conn: &mut PooledConnection<'_, RedisConnectionManager>,
+        key: &str,
+        activity_id: &uuid::Uuid,
+        ttl_seconds: u64,
+    ) -> Result<(), WorkerError> {
+        let idempotency_key = self.get_idempotency_key(key);
+        let _: () = conn
+            .set_ex(&idempotency_key, activity_id.to_string(), ttl_seconds)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Atomically try to store an idempotency record using Redis SET NX EX.
+    ///
+    /// This is a thread-safe operation that atomically checks if the key exists and sets it if it doesn't.
+    /// Returns `Ok(true)` if the key was successfully set (we claimed it).
+    /// Returns `Ok(false)` if the key already exists (someone else has it).
+    async fn try_store_idempotency_record_atomic(
+        &self,
+        conn: &mut PooledConnection<'_, RedisConnectionManager>,
+        key: &str,
+        activity_id: &uuid::Uuid,
+        ttl_seconds: u64,
+    ) -> Result<bool, WorkerError> {
+        let idempotency_key = self.get_idempotency_key(key);
+
+        // Use Redis SET key value NX EX ttl for atomic check-and-set
+        // Returns "OK" if set, nil if key exists
+        // Note: Use &mut **conn (double deref) to get the underlying connection
+        let result: Option<String> = redis::cmd("SET")
+            .arg(&idempotency_key)
+            .arg(activity_id.to_string())
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl_seconds)
+            .query_async(&mut **conn)
+            .await
+            .map_err(|e| {
+                WorkerError::QueueError(format!("Failed to atomically set idempotency key: {}", e))
+            })?;
+
+        Ok(result.is_some())
+    }
+
+    /// Evaluate idempotency rules for an activity using atomic operations.
+    ///
+    /// This method is thread-safe and uses atomic Redis operations to prevent race conditions.
+    /// It should be called early in the activity execution flow, before enqueueing.
+    ///
+    /// Returns:
+    /// - `Ok(None)` if the activity should proceed with enqueue
+    /// - `Ok(Some(existing_id))` if `ReturnExisting` behavior is used and an existing activity was found
+    /// - `Err(...)` if there was an error or conflict
+    pub(crate) async fn evaluate_idempotency_rule_for_enqueue(
+        &self,
+        conn: &mut PooledConnection<'_, RedisConnectionManager>,
+        activity: &Activity,
+    ) -> Result<Option<uuid::Uuid>, WorkerError> {
+        if let Some((ref key, ref behavior)) = activity.idempotency_key {
+            // Try to atomically claim the idempotency key
+            let claimed = self
+                .try_store_idempotency_record_atomic(
+                    conn,
+                    key,
+                    &activity.id,
+                    Self::IDEMPOTENCY_KEY_TTL_SECONDS as u64,
+                )
+                .await?;
+
+            if claimed {
+                // We successfully claimed the key, proceed with enqueue
+                return Ok(None);
+            }
+
+            // Key already exists, load the existing activity snapshot to check its status
+            let existing_id = self.check_idempotency(conn, key).await?.ok_or_else(|| {
+                WorkerError::QueueError(
+                    "Idempotency key exists but activity_id not found".to_string(),
+                )
+            })?;
+
+            let existing_snapshot = match self.load_snapshot(conn, &existing_id).await {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    // Snapshot doesn't exist, treat as if key doesn't exist and claim it
+                    // This can happen if the snapshot expired but idempotency key hasn't
+                    self.store_idempotency_record(
+                        conn,
+                        key,
+                        &activity.id,
+                        Self::IDEMPOTENCY_KEY_TTL_SECONDS as u64,
+                    )
+                    .await?;
+                    return Ok(None);
+                }
+            };
+
+            match behavior {
+                OnDuplicate::AllowReuse => {
+                    // Update idempotency record to point to new activity
+                    self.store_idempotency_record(
+                        conn,
+                        key,
+                        &activity.id,
+                        Self::IDEMPOTENCY_KEY_TTL_SECONDS as u64,
+                    )
+                    .await?;
+                    // Continue with enqueue
+                    Ok(None)
+                }
+                OnDuplicate::ReturnExisting => {
+                    // Return the existing activity ID - caller should return existing ActivityFuture
+                    Ok(Some(existing_id))
+                }
+                OnDuplicate::AllowReuseOnFailure => {
+                    // Only allow if previous activity failed or is dead letter
+                    if existing_snapshot.status != ActivityStatus::Failed
+                        && existing_snapshot.status != ActivityStatus::DeadLetter
+                    {
+                        return Err(WorkerError::IdempotencyConflict(format!(
+                            "Idempotency key '{}' already exists with status '{:?}'. Only failed or dead_letter activities can be reused.",
+                            key, existing_snapshot.status
+                        )));
+                    }
+                    // Update idempotency record to point to new activity
+                    self.store_idempotency_record(
+                        conn,
+                        key,
+                        &activity.id,
+                        Self::IDEMPOTENCY_KEY_TTL_SECONDS as u64,
+                    )
+                    .await?;
+                    // Continue with enqueue
+                    Ok(None)
+                }
+                OnDuplicate::NoReuse => Err(WorkerError::DuplicateActivity(format!(
+                    "Idempotency key '{}' already exists for activity {}",
+                    key, existing_id
+                ))),
+            }
+        } else {
+            // No idempotency key, proceed with enqueue
+            Ok(None)
+        }
+    }
+
     async fn write_snapshot(
         &self,
         conn: &mut PooledConnection<'_, RedisConnectionManager>,
@@ -422,6 +620,10 @@ impl ActivityQueue {
         fields.push((
             "processing_member".to_string(),
             snapshot.processing_member.clone().unwrap_or_default(),
+        ));
+        fields.push((
+            "idempotency_key".to_string(),
+            snapshot.idempotency_key.clone().unwrap_or_default(),
         ));
 
         let _: () = conn.hset_multiple(&activity_key, &fields).await?;
@@ -912,7 +1114,8 @@ impl ActivityQueueTrait for ActivityQueue {
             snapshot.mark_completed(now);
             self.write_snapshot(&mut conn, &snapshot).await?;
             // Add to completed set so it appears in completed section
-            self.add_to_completed_set(&mut conn, &activity_id, now).await?;
+            self.add_to_completed_set(&mut conn, &activity_id, now)
+                .await?;
             self.record_event(
                 &mut conn,
                 &activity_id,
@@ -967,7 +1170,8 @@ impl ActivityQueueTrait for ActivityQueue {
             snapshot.mark_completed(now);
             self.write_snapshot(&mut conn, &snapshot).await?;
             // Add to completed set so it appears in completed section
-            self.add_to_completed_set(&mut conn, &activity_id, now).await?;
+            self.add_to_completed_set(&mut conn, &activity_id, now)
+                .await?;
             let dead_letter_error = error_message.clone();
             self.record_event(
                 &mut conn,
@@ -979,7 +1183,7 @@ impl ActivityQueueTrait for ActivityQueue {
                 })),
             )
             .await?;
-            self.add_to_dead_letter_queue(activity, dead_letter_error)
+            self.add_to_dead_letter_queue(activity.clone(), dead_letter_error)
                 .await?;
             error!(activity_id = %activity_id, "Activity moved to dead letter queue");
         }
@@ -1398,6 +1602,26 @@ impl ActivityQueueTrait for ActivityQueue {
             None => Ok(None),
         }
     }
+
+    async fn check_idempotency_key(&self, key: &str) -> Result<Option<uuid::Uuid>, WorkerError> {
+        let mut conn = self.redis_pool.get().await.map_err(|e| {
+            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
+        })?;
+
+        self.check_idempotency(&mut conn, key).await
+    }
+
+    async fn evaluate_idempotency_rule(
+        &self,
+        activity: &Activity,
+    ) -> Result<Option<uuid::Uuid>, WorkerError> {
+        let mut conn = self.redis_pool.get().await.map_err(|e| {
+            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
+        })?;
+
+        self.evaluate_idempotency_rule_for_enqueue(&mut conn, activity)
+            .await
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1424,6 +1648,7 @@ pub struct ActivitySnapshot {
     pub score: Option<f64>,
     pub lease_deadline_ms: Option<i64>,
     pub processing_member: Option<String>,
+    pub idempotency_key: Option<String>,
 }
 
 impl ActivitySnapshot {
@@ -1451,6 +1676,10 @@ impl ActivitySnapshot {
             score: None,
             lease_deadline_ms: None,
             processing_member: None,
+            idempotency_key: activity
+                .idempotency_key
+                .as_ref()
+                .map(|(key, _)| key.clone()),
         }
     }
 

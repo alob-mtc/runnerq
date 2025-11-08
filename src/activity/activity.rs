@@ -58,6 +58,47 @@ pub enum ActivityPriority {
     Critical = 4,
 }
 
+/// Behavior when an activity with the same idempotency key already exists.
+///
+/// This enum determines how the system handles duplicate idempotency keys when enqueuing activities.
+///
+/// # Examples
+///
+/// ```rust
+/// use runner_q::{OnDuplicate, ActivityPriority};
+/// use std::time::Duration;
+///
+/// // Always allow reuse - create new activity even if key exists
+/// let allow_reuse = OnDuplicate::AllowReuse;
+///
+/// // Return existing ActivityFuture if key exists
+/// let return_existing = OnDuplicate::ReturnExisting;
+///
+/// // Only allow reuse if previous activity failed
+/// let allow_on_failure = OnDuplicate::AllowReuseOnFailure;
+///
+/// // Never allow reuse - error if key exists
+/// let no_reuse = OnDuplicate::NoReuse;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OnDuplicate {
+    /// Always allow reuse of the idempotency key.
+    /// Creates a new activity and updates the idempotency record to point to the new activity.
+    AllowReuse,
+
+    /// Return the existing ActivityFuture if an activity with this key exists.
+    /// Returns the existing ActivityFuture regardless of the previous activity's status.
+    ReturnExisting,
+
+    /// Allow reuse only if the previous activity with this key failed (Failed or DeadLetter status).
+    /// Returns an error if the previous activity is still pending, processing, or completed.
+    AllowReuseOnFailure,
+
+    /// Never allow reuse of the idempotency key.
+    /// Returns an error if an activity with this key already exists, regardless of status.
+    NoReuse,
+}
+
 /// Activity status tracking throughout the activity lifecycle.
 ///
 /// Activities progress through these states as they are processed by the worker engine.
@@ -125,6 +166,12 @@ pub(crate) struct ActivityOption {
     /// When `None`, the activity is executed immediately.
     /// When `Some(seconds)`, the activity is scheduled for future execution.
     pub delay_seconds: Option<u64>,
+
+    /// Idempotency key and behavior for duplicate detection.
+    ///
+    /// When `Some((key, behavior))`, the system will check for existing activities with the same key
+    /// and handle duplicates according to the specified behavior.
+    pub idempotency_key: Option<(String, OnDuplicate)>,
 }
 
 /// Represents an Activity to be processed
@@ -142,6 +189,7 @@ pub(crate) struct Activity {
     pub timeout_seconds: u64,
     pub retry_delay_seconds: u64,
     pub metadata: HashMap<String, String>,
+    pub idempotency_key: Option<(String, OnDuplicate)>,
 }
 
 impl Activity {
@@ -150,16 +198,18 @@ impl Activity {
         payload: serde_json::Value,
         option: Option<ActivityOption>,
     ) -> Self {
-        let (priority, max_retries, timeout_seconds, delay_seconds) = if let Some(opt) = option {
-            (
-                opt.priority.unwrap_or(ActivityPriority::default()),
-                opt.max_retries,
-                opt.timeout_seconds,
-                opt.delay_seconds,
-            )
-        } else {
-            (ActivityPriority::default(), 3, 300, None)
-        };
+        let (priority, max_retries, timeout_seconds, delay_seconds, idempotency_key) =
+            if let Some(opt) = option {
+                (
+                    opt.priority.unwrap_or(ActivityPriority::default()),
+                    opt.max_retries,
+                    opt.timeout_seconds,
+                    opt.delay_seconds,
+                    opt.idempotency_key,
+                )
+            } else {
+                (ActivityPriority::default(), 3, 300, None, None)
+            };
 
         Self {
             id: Uuid::new_v4(),
@@ -176,6 +226,7 @@ impl Activity {
             timeout_seconds,
             retry_delay_seconds: 1,
             metadata: HashMap::new(),
+            idempotency_key,
         }
     }
 }

@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let mut engine = WorkerEngine::builder()
         .redis_url(&redis_url)
         .queue_name("test_sse")
-        .max_workers(2)
+        .max_workers(15)
         .build()
         .await?;
 
@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
                     "counter": counter,
                     "timestamp": chrono::Utc::now().to_rfc3339()
                 }))
+                .idempotency_key("key", runner_q::OnDuplicate::ReturnExisting)
                 .execute()
                 .await
             {
