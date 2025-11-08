@@ -498,14 +498,21 @@ impl ActivityQueue {
                             key, existing_snapshot.status
                         )));
                     }
-                    // Update idempotency record to point to new activity
-                    self.store_idempotency_record(
-                        conn,
-                        key,
-                        &activity.id,
-                        Self::IDEMPOTENCY_KEY_TTL_SECONDS as u64,
-                    )
-                    .await?;
+                    let claimed = self
+                        .try_store_idempotency_record_atomic(
+                            conn,
+                            key,
+                            &activity.id,
+                            Self::IDEMPOTENCY_KEY_TTL_SECONDS as u64,
+                        )
+                        .await?;
+                    if !claimed {
+                        return Err(WorkerError::IdempotencyConflict(format!(
+                            "Idempotency key '{}' already exists with status '{:?}'. Only failed or dead_letter activities can be reused.",
+                            key, existing_snapshot.status
+                        )));
+                    }
+
                     // Continue with enqueue
                     Ok(None)
                 }
