@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let mut engine = WorkerEngine::builder()
         .redis_url(&redis_url)
         .queue_name("test_sse")
-        .max_workers(15)
+        .max_workers(2)
         .build()
         .await?;
 
