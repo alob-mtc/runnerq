@@ -418,6 +418,58 @@ impl ActivityQueue {
         Ok(result.is_some())
     }
 
+    /// Atomically replace an idempotency record only if it currently matches the expected value.
+    ///
+    /// This performs a compare-and-swap operation: it only updates the idempotency key
+    /// if the current value matches `expected_activity_id`. This ensures that only the first
+    /// thread that sees the failed activity can claim the key, while others will get a conflict.
+    ///
+    /// Returns `Ok(true)` if the key was successfully replaced (we claimed it).
+    /// Returns `Ok(false)` if the key value doesn't match (someone else already claimed it).
+    async fn replace_idempotency_record_if_matches(
+        &self,
+        conn: &mut PooledConnection<'_, RedisConnectionManager>,
+        key: &str,
+        expected_activity_id: &uuid::Uuid,
+        new_activity_id: &uuid::Uuid,
+        ttl_seconds: u64,
+    ) -> Result<bool, WorkerError> {
+        let idempotency_key = self.get_idempotency_key(key);
+
+        // Lua script to atomically check and replace:
+        // 1. GET current value
+        // 2. Compare with expected value
+        // 3. If match, SET new value with TTL and return 1
+        // 4. If no match, return 0
+        let lua = r#"
+        local current = redis.call('GET', KEYS[1])
+        if current == ARGV[1] then
+            redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+            return 1
+        else
+            return 0
+        end
+        "#;
+
+        let result: i64 = redis::cmd("EVAL")
+            .arg(lua)
+            .arg(1)
+            .arg(&idempotency_key)
+            .arg(expected_activity_id.to_string())
+            .arg(new_activity_id.to_string())
+            .arg(ttl_seconds)
+            .query_async(&mut **conn)
+            .await
+            .map_err(|e| {
+                WorkerError::QueueError(format!(
+                    "Failed to atomically replace idempotency key: {}",
+                    e
+                ))
+            })?;
+
+        Ok(result == 1)
+    }
+
     /// Evaluate idempotency rules for an activity using atomic operations.
     ///
     /// This method is thread-safe and uses atomic Redis operations to prevent race conditions.
@@ -498,14 +550,23 @@ impl ActivityQueue {
                             key, existing_snapshot.status
                         )));
                     }
-                    // Update idempotency record to point to new activity
-                    self.store_idempotency_record(
-                        conn,
-                        key,
-                        &activity.id,
-                        Self::IDEMPOTENCY_KEY_TTL_SECONDS as u64,
-                    )
-                    .await?;
+                    // Atomically replace the idempotency key only if it still points to the existing failed activity
+                    // This ensures only the first thread that sees the failure can claim it
+                    let claimed = self
+                        .replace_idempotency_record_if_matches(
+                            conn,
+                            key,
+                            &existing_id,
+                            &activity.id,
+                            Self::IDEMPOTENCY_KEY_TTL_SECONDS as u64,
+                        )
+                        .await?;
+                    if !claimed {
+                        return Err(WorkerError::IdempotencyConflict(format!(
+                            "Idempotency key '{}' already exists with status '{:?}'. Only failed or dead_letter activities can be reused.",
+                            key, existing_snapshot.status
+                        )));
+                    }
                     // Continue with enqueue
                     Ok(None)
                 }
