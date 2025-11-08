@@ -512,7 +512,6 @@ impl ActivityQueue {
                             key, existing_snapshot.status
                         )));
                     }
-
                     // Continue with enqueue
                     Ok(None)
                 }
