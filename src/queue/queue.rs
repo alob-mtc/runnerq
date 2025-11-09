@@ -1,4 +1,4 @@
-use crate::worker::WorkerError;
+use crate::runner::error::WorkerError;
 use crate::{
     activity::activity::{Activity, ActivityStatus, OnDuplicate},
     ActivityPriority,

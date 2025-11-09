@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::activity::activity::{Activity, ActivityStatus};
 use crate::queue::queue::{ActivityEvent, ActivitySnapshot, QueueStats};
-use crate::worker::WorkerError;
+use crate::runner::error::WorkerError;
 
 #[derive(Clone)]
 pub struct QueueInspector {

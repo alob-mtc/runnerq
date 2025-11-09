@@ -50,14 +50,14 @@
 //!             .as_object()
 //!             .ok_or_else(|| ActivityError::NonRetry("Invalid payload format".to_string()))?
 //!             .clone();
-//!         
+//!
 //!         let to = email_data.get("to")
 //!             .and_then(|v| v.as_str())
 //!             .ok_or_else(|| ActivityError::NonRetry("Missing 'to' field".to_string()))?;
-//!         
+//!
 //!         // Simulate sending email
 //!         println!("Sending email to: {}", to);
-//!         
+//!
 //!         // Return success with result data
 //!         Ok(Some(serde_json::json!({
 //!             "message": format!("Email sent to {}", to),
@@ -157,7 +157,7 @@
 //!         let order_id = payload["order_id"]
 //!             .as_str()
 //!             .ok_or_else(|| ActivityError::NonRetry("Missing order_id".to_string()))?;
-//!         
+//!
 //!         // Step 1: Validate payment
 //!         let _payment_future = context.activity_executor
 //!             .activity("validate_payment")
@@ -167,14 +167,14 @@
 //!             .timeout(std::time::Duration::from_secs(120))
 //!             .execute()
 //!             .await.map_err(|e| ActivityError::Retry(format!("Failed to enqueue payment validation: {}", e)))?;
-//!         
+//!
 //!         // Step 2: Update inventory
 //!         let _inventory_future = context.activity_executor
 //!             .activity("update_inventory")
 //!             .payload(serde_json::json!({"order_id": order_id}))
 //!             .execute()
 //!             .await.map_err(|e| ActivityError::Retry(format!("Failed to enqueue inventory update: {}", e)))?;
-//!         
+//!
 //!         // Step 3: Schedule delivery notification for later
 //!         context.activity_executor
 //!             .activity("send_delivery_notification")
@@ -184,7 +184,7 @@
 //!             .delay(std::time::Duration::from_secs(3600)) // 1 hour
 //!             .execute()
 //!             .await.map_err(|e| ActivityError::Retry(format!("Failed to schedule notification: {}", e)))?;
-//!         
+//!
 //!         Ok(Some(serde_json::json!({
 //!             "order_id": order_id,
 //!             "status": "processing",
@@ -203,7 +203,6 @@ pub mod config;
 pub mod observability;
 pub mod queue;
 pub mod runner;
-pub mod worker;
 
 // Re-export main types for easy access
 pub use crate::config::WorkerConfig;
