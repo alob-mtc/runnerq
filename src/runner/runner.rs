@@ -1,6 +1,6 @@
 use crate::activity::activity::{
-    Activity, ActivityFuture, ActivityHandler, ActivityHandlerRegistry, ActivityOption,
-    ActivityPriority, OnDuplicate,
+    Activity, ActivityFuture, ActivityHandler, ActivityHandlerRegistry,
+    ActivityOption, ActivityPriority, OnDuplicate,
 };
 use crate::config::WorkerConfig;
 use crate::observability::QueueInspector;
@@ -12,7 +12,9 @@ use crate::runner::redis::{create_redis_pool, create_redis_pool_with_config, Red
 use crate::{ActivityContext, ActivityError};
 use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
+use futures::FutureExt;
 use serde_json::json;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, watch, RwLock, Semaphore};
@@ -621,7 +623,19 @@ impl WorkerEngine {
                         drop(permit);
                         break;
                     }
-                    res = tokio::time::timeout(activity_timeout, handle_fut) => res
+                    res = tokio::time::timeout(activity_timeout, async {
+                        // Use catch_unwind to catch panics from handle_fut.await
+                        match AssertUnwindSafe(handle_fut).catch_unwind().await {
+                            Ok(value) => value,
+                            Err(e) => {
+                                let err_msg = e.downcast_ref::<String>()
+                                    .map(|s| format!("panic: {}", s))
+                                    .or_else(|| e.downcast_ref::<&str>().map(|s| format!("panic: {}", s)))
+                                    .unwrap_or_else(|| "panic (unknown)".to_string());
+                                Err(ActivityError::Retry(err_msg))
+                            },
+                        }
+                    }) => res,
                 };
 
                 match timed {
