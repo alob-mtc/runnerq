@@ -10,7 +10,6 @@ use axum::{
 };
 use futures::stream::{Stream, StreamExt};
 use serde::Deserialize;
-use tokio_stream::wrappers::BroadcastStream;
 
 use crate::observability::inspector::{DeadLetterRecord, QueueInspector};
 use crate::queue::queue::{ActivityEvent, QueueStats};
@@ -239,14 +238,11 @@ async fn dead_letters(
 async fn event_stream(
     State(state): State<UiState>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, axum::Error>>>, StatusCode> {
-    // Get event receiver from inspector
-    let receiver = state
-        .inspector
-        .subscribe_events()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    // Get event stream directly from Redis Streams
+    let stream = state.inspector.event_stream();
 
-    // Convert broadcast receiver to stream
-    let stream = BroadcastStream::new(receiver).filter_map(|result| async move {
+    // Convert ActivityEvent stream to SSE Event stream
+    let stream = stream.filter_map(|result| async move {
         match result {
             Ok(activity_event) => {
                 // Serialize event as JSON
@@ -255,7 +251,7 @@ async fn event_stream(
                     Err(_) => None,
                 }
             }
-            Err(_) => None, // Lagged/closed
+            Err(_) => None, // Skip errors, continue streaming
         }
     });
 
