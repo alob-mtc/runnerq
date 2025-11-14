@@ -1,13 +1,15 @@
 use std::ops::RangeInclusive;
+use std::time::Duration;
 
 use bb8_redis::{
     bb8::{Pool, PooledConnection},
     RedisConnectionManager,
 };
 use chrono::{DateTime, Utc};
+use futures::stream::{Stream, StreamExt};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::activity::activity::{Activity, ActivityStatus};
@@ -18,7 +20,6 @@ use crate::runner::error::WorkerError;
 pub struct QueueInspector {
     redis_pool: Pool<RedisConnectionManager>,
     queue_name: String,
-    event_tx: Option<broadcast::Sender<ActivityEvent>>,
     max_workers: Option<usize>,
 }
 
@@ -28,13 +29,7 @@ impl QueueInspector {
             redis_pool,
             queue_name: queue_name.into(),
             max_workers: None,
-            event_tx: None,
         }
-    }
-
-    pub fn with_event_stream(mut self, sender: broadcast::Sender<ActivityEvent>) -> Self {
-        self.event_tx = Some(sender);
-        self
     }
 
     pub fn with_max_workers(mut self, max_workers: usize) -> Self {
@@ -42,8 +37,145 @@ impl QueueInspector {
         self
     }
 
-    pub fn subscribe_events(&self) -> Option<broadcast::Receiver<ActivityEvent>> {
-        self.event_tx.as_ref().map(|tx| tx.subscribe())
+    /// Create a stream that reads events directly from Redis Streams.
+    ///
+    /// This stream reads from the global events stream and yields ActivityEvent items.
+    /// It's designed to be used directly with SSE endpoints, bypassing in-memory channels.
+    /// This enables cross-process event streaming.
+    pub fn event_stream(&self) -> impl Stream<Item = Result<ActivityEvent, WorkerError>> {
+        let redis_pool = self.redis_pool.clone();
+        let stream_key = format!("{}:events_stream", self.queue_name);
+        let queue_name = self.queue_name.clone();
+
+        futures::stream::unfold(
+            (redis_pool, stream_key, queue_name, "$".to_string()),
+            move |state| async move {
+                let (pool, key, qn, mut last_id) = state;
+
+                // Get Redis connection
+                let mut conn = match pool.get().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        error!(
+                            queue_name = %qn,
+                            error = %e,
+                            "Failed to get Redis connection for event stream"
+                        );
+                        // Wait a bit before retrying
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                        return Some((
+                            Err(WorkerError::QueueError(format!(
+                                "Redis connection error: {}",
+                                e
+                            ))),
+                            (pool.clone(), key.clone(), qn.clone(), last_id),
+                        ));
+                    }
+                };
+
+                // Read from stream using XREAD
+                let result: Result<redis::streams::StreamReadReply, redis::RedisError> = conn
+                    .xread_options(
+                        &[key.as_str()],
+                        &[last_id.as_str()],
+                        &redis::streams::StreamReadOptions::default()
+                            .count(50) // Read up to 50 events at a time
+                            .block(1000), // Block for 1 second if no events
+                    )
+                    .await;
+
+                match result {
+                    Ok(reply) => {
+                        // Process each stream in the reply
+                        for stream_key_reply in reply.keys {
+                            for stream_id in stream_key_reply.ids {
+                                last_id = stream_id.id.clone();
+
+                                // Extract the event data
+                                for (field, value) in &stream_id.map {
+                                    if field == "event" {
+                                        if let redis::Value::Data(data) = value {
+                                            match String::from_utf8(data.clone()) {
+                                                Ok(json_str) => {
+                                                    match serde_json::from_str::<ActivityEvent>(
+                                                        &json_str,
+                                                    ) {
+                                                        Ok(event) => {
+                                                            return Some((
+                                                                Ok(event),
+                                                                (
+                                                                    pool.clone(),
+                                                                    key.clone(),
+                                                                    qn.clone(),
+                                                                    last_id,
+                                                                ),
+                                                            ));
+                                                        }
+                                                        Err(e) => {
+                                                            warn!(
+                                                                queue_name = %qn,
+                                                                stream_id = %stream_id.id,
+                                                                error = %e,
+                                                                "Failed to parse event from stream"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    warn!(
+                                                        queue_name = %qn,
+                                                        stream_id = %stream_id.id,
+                                                        error = %e,
+                                                        "Failed to decode event data from stream"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // No events in this batch, continue
+                        Some((
+                            Err(WorkerError::QueueError("No events".to_string())),
+                            (pool.clone(), key.clone(), qn.clone(), last_id),
+                        ))
+                    }
+                    Err(e) if e.kind() == redis::ErrorKind::IoError => {
+                        // Connection error - wait and retry
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                        Some((
+                            Err(WorkerError::QueueError("Redis IO error".to_string())),
+                            (pool.clone(), key.clone(), qn.clone(), last_id),
+                        ))
+                    }
+                    Err(e) => {
+                        warn!(
+                            queue_name = %qn,
+                            error = %e,
+                            "Error reading from Redis stream"
+                        );
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                        Some((
+                            Err(WorkerError::QueueError(format!(
+                                "Redis stream error: {}",
+                                e
+                            ))),
+                            (pool.clone(), key.clone(), qn.clone(), last_id),
+                        ))
+                    }
+                }
+            },
+        )
+        .filter_map(|result| async move {
+            match result {
+                Ok(event) => Some(Ok(event)),
+                Err(_) => {
+                    // Filter out errors - continue streaming on errors
+                    None
+                }
+            }
+        })
     }
 
     pub async fn list_pending(

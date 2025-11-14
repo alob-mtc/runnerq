@@ -11,9 +11,7 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 /// Trait defining the interface for activity queue operations
@@ -115,14 +113,13 @@ pub struct ActivityQueue {
     queue_name: String,
     /// Default lease duration in milliseconds used when claiming items
     default_lease_ms: u64,
-    event_tx: Arc<RwLock<Option<broadcast::Sender<ActivityEvent>>>>,
 }
 
 impl ActivityQueue {
     const SNAPSHOT_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
     const IDEMPOTENCY_KEY_TTL_SECONDS: i64 = 24 * 60 * 60;
-    const EVENT_TTL_SECONDS: i64 = Self::SNAPSHOT_TTL_SECONDS;
-    const EVENT_MAX_LEN: isize = 200;
+    const EVENT_TTL_SECONDS: i64 = 60;
+    const EVENT_MAX_LEN: isize = 100;
 
     /// Creates a new ActivityQueue backed by the given Redis connection pool and using `queue_name` as the key prefix.
     ///
@@ -143,7 +140,6 @@ impl ActivityQueue {
             redis_pool,
             queue_name,
             default_lease_ms,
-            event_tx: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -180,25 +176,17 @@ impl ActivityQueue {
         format!("{}:completed_activities", self.queue_name)
     }
 
+    /// Return the Redis key for the global events stream (for real-time streaming)
+    fn get_events_stream_key(&self) -> String {
+        format!("{}:events_stream", self.queue_name)
+    }
+
     pub fn redis_pool(&self) -> Pool<RedisConnectionManager> {
         self.redis_pool.clone()
     }
 
     pub fn queue_name(&self) -> &str {
         &self.queue_name
-    }
-
-    pub fn set_event_channel(&self, sender: broadcast::Sender<ActivityEvent>) {
-        if let Ok(mut guard) = self.event_tx.write() {
-            *guard = Some(sender);
-        }
-    }
-
-    pub fn event_channel(&self) -> Option<broadcast::Sender<ActivityEvent>> {
-        self.event_tx
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().cloned())
     }
 
     fn get_activity_key(&self, activity_id: &uuid::Uuid) -> String {
@@ -724,20 +712,30 @@ impl ActivityQueue {
             detail,
         };
 
-        let events_key = self.get_activity_events_key(activity_id);
         let payload = serde_json::to_string(&activity_event)?;
-        let _: () = conn.rpush(&events_key, payload).await?;
-        let _: () = conn.ltrim(&events_key, -Self::EVENT_MAX_LEN, -1).await?;
-        let _: () = conn.expire(&events_key, Self::EVENT_TTL_SECONDS).await?;
 
-        if let Some(tx) = self
-            .event_tx
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().cloned())
-        {
-            let _ = tx.send(activity_event.clone());
-        }
+        // Write to global Redis Stream (for cross-process real-time streaming)
+        let global_stream_key = self.get_events_stream_key();
+        let _: Option<String> = conn
+            .xadd(&global_stream_key, "*", &[("event", payload.as_str())])
+            .await?;
+        // Trim stream to keep only recent events (approximate trimming for performance)
+        let _: i64 = redis::cmd("XTRIM")
+            .arg(&global_stream_key)
+            .arg("MAXLEN")
+            .arg("~")
+            .arg(Self::EVENT_MAX_LEN)
+            .query_async(&mut **conn)
+            .await?;
+        let _: () = conn
+            .expire(&global_stream_key, Self::EVENT_TTL_SECONDS)
+            .await?;
+
+        // Also keep per-activity lists for efficient querying
+        let events_key = self.get_activity_events_key(activity_id);
+        let _: () = conn.rpush(&events_key, payload.clone()).await?;
+        let _: () = conn.ltrim(&events_key, -Self::EVENT_MAX_LEN, -1).await?;
+        let _: () = conn.expire(&events_key, Self::SNAPSHOT_TTL_SECONDS).await?;
 
         Ok(())
     }

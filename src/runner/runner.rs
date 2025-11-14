@@ -5,7 +5,7 @@ use crate::activity::activity::{
 use crate::config::WorkerConfig;
 use crate::observability::QueueInspector;
 use crate::queue::queue::{
-    ActivityEvent, ActivityQueue, ActivityQueueTrait, ActivityResult, ResultState,
+    ActivityQueue, ActivityQueueTrait, ActivityResult, ResultState,
 };
 use crate::runner::error::WorkerError;
 use crate::runner::redis::{create_redis_pool, create_redis_pool_with_config, RedisConfig};
@@ -17,7 +17,7 @@ use serde_json::json;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, watch, RwLock, Semaphore};
+use tokio::sync::{watch, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -135,7 +135,6 @@ pub struct WorkerEngine {
     shutdown_tx: watch::Sender<bool>,
     cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsSink>,
-    event_tx: Option<broadcast::Sender<ActivityEvent>>,
 }
 
 impl WorkerEngine {
@@ -218,7 +217,6 @@ impl WorkerEngine {
             shutdown_tx,
             cancel_token: CancellationToken::new(),
             metrics: Arc::new(NoopMetrics),
-            event_tx: None,
         }
     }
 
@@ -226,35 +224,12 @@ impl WorkerEngine {
         self.metrics = sink;
     }
 
-    pub fn enable_event_stream(&mut self, capacity: usize) -> broadcast::Receiver<ActivityEvent> {
-        let (tx, rx) = broadcast::channel(capacity);
-        self.queue_core.set_event_channel(tx.clone());
-        self.event_tx = Some(tx);
-        rx
-    }
-
-    pub fn subscribe_events(&self) -> Option<broadcast::Receiver<ActivityEvent>> {
-        self.event_tx.as_ref().map(|tx| tx.subscribe())
-    }
-
     pub fn inspector(&self) -> QueueInspector {
-        let mut inspector = QueueInspector::new(
+        QueueInspector::new(
             self.queue_core.redis_pool(),
             self.queue_core.queue_name().to_string(),
         )
-        .with_max_workers(self.config.max_concurrent_activities);
-
-        // Get existing event channel or create one for the inspector
-        if let Some(tx) = self.queue_core.event_channel() {
-            inspector = inspector.with_event_stream(tx);
-        } else {
-            // Auto-enable event stream for inspector with capacity of 64
-            let (tx, _rx) = tokio::sync::broadcast::channel(64);
-            self.queue_core.set_event_channel(tx.clone());
-            inspector = inspector.with_event_stream(tx);
-        }
-
-        inspector
+        .with_max_workers(self.config.max_concurrent_activities)
     }
 
     /// Creates a new WorkerEngineBuilder for fluent configuration.
@@ -998,7 +973,6 @@ pub struct WorkerEngineBuilder {
     schedule_poll_interval: Option<Duration>,
     redis_config: Option<RedisConfig>,
     metrics: Option<Arc<dyn MetricsSink>>,
-    event_stream_capacity: Option<usize>,
 }
 
 impl WorkerEngineBuilder {
@@ -1011,7 +985,6 @@ impl WorkerEngineBuilder {
             schedule_poll_interval: None,
             redis_config: None,
             metrics: None,
-            event_stream_capacity: None,
         }
     }
 
@@ -1075,10 +1048,6 @@ impl WorkerEngineBuilder {
         self
     }
 
-    pub fn event_stream(mut self, capacity: usize) -> Self {
-        self.event_stream_capacity = Some(capacity);
-        self
-    }
 
     /// Builds the WorkerEngine with the configured settings.
     ///
@@ -1119,10 +1088,6 @@ impl WorkerEngineBuilder {
         // Apply custom metrics if provided
         if let Some(metrics) = self.metrics {
             worker_engine.with_metrics(metrics);
-        }
-
-        if let Some(capacity) = self.event_stream_capacity {
-            worker_engine.enable_event_stream(capacity);
         }
 
         Ok(worker_engine)
