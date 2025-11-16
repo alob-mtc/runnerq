@@ -1418,6 +1418,7 @@ impl ActivityQueueTrait for ActivityQueue {
         local now = tonumber(ARGV[1])
         local limit = tonumber(ARGV[2])
         local moved_ids = {}
+        local cleaned_ids = {}
         local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, limit)
 
         for _, m in ipairs(members) do
@@ -1445,14 +1446,15 @@ impl ActivityQueueTrait for ActivityQueue {
                 local id = string.sub(m, 1, colon - 1)
                 local activity_key = 'activity:' .. id
                 redis.call('HDEL', activity_key, 'processing_member', 'lease_deadline_ms')
+                table.insert(cleaned_ids, id)
                 end
             end
         end
         end
-        return moved_ids
+        return {moved_ids, cleaned_ids}
         "#;
 
-        let moved_ids: Vec<String> = redis::cmd("EVAL")
+        let result: (Vec<String>, Vec<String>) = redis::cmd("EVAL")
             .arg(lua)
             .arg(2)
             .arg(&processing_key)
@@ -1463,7 +1465,16 @@ impl ActivityQueueTrait for ActivityQueue {
             .await
             .map_err(|e| WorkerError::QueueError(format!("requeue_expired EVAL failed: {}", e)))?;
 
-        for id_str in &moved_ids {
+        let (moved_ids, cleaned_ids) = result;
+
+        // Process both requeued items and items that were already in main queue
+        let all_ids: Vec<String> = moved_ids
+            .iter()
+            .chain(cleaned_ids.iter())
+            .cloned()
+            .collect();
+
+        for id_str in &all_ids {
             if let Ok(activity_id) = uuid::Uuid::parse_str(id_str) {
                 if let Ok(mut snapshot) = self.load_snapshot(&mut conn, &activity_id).await {
                     let transition_at = Self::now();
