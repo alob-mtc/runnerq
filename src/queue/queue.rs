@@ -1422,17 +1422,30 @@ impl ActivityQueueTrait for ActivityQueue {
 
         for _, m in ipairs(members) do
         if redis.call('ZREM', KEYS[1], m) == 1 then
-            local colon = string.find(m, ':', 1, true)
-            if colon then
-            local id = string.sub(m, 1, colon - 1)
-            local activity_key = 'activity:' .. id
-            local score = redis.call('HGET', activity_key, 'score')
-            if not score then score = now end
-            redis.call('ZADD', KEYS[2], score, m)
-            redis.call('HDEL', activity_key, 'processing_member', 'lease_deadline_ms')
-            table.insert(moved_ids, id)
+            -- Check if member is already in main queue to prevent duplicates
+            local existing_score = redis.call('ZSCORE', KEYS[2], m)
+            if existing_score == false then
+                -- Member not in main queue, safe to requeue
+                local colon = string.find(m, ':', 1, true)
+                if colon then
+                local id = string.sub(m, 1, colon - 1)
+                local activity_key = 'activity:' .. id
+                local score = redis.call('HGET', activity_key, 'score')
+                if not score then score = now end
+                redis.call('ZADD', KEYS[2], score, m)
+                redis.call('HDEL', activity_key, 'processing_member', 'lease_deadline_ms')
+                table.insert(moved_ids, id)
+                else
+                redis.call('ZADD', KEYS[2], now, m)
+                end
             else
-            redis.call('ZADD', KEYS[2], now, m)
+                -- Member already in main queue, skip ZADD but still clean up processing metadata
+                local colon = string.find(m, ':', 1, true)
+                if colon then
+                local id = string.sub(m, 1, colon - 1)
+                local activity_key = 'activity:' .. id
+                redis.call('HDEL', activity_key, 'processing_member', 'lease_deadline_ms')
+                end
             end
         end
         end
