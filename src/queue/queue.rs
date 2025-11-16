@@ -1418,28 +1418,43 @@ impl ActivityQueueTrait for ActivityQueue {
         local now = tonumber(ARGV[1])
         local limit = tonumber(ARGV[2])
         local moved_ids = {}
+        local cleaned_ids = {}
         local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, limit)
 
         for _, m in ipairs(members) do
         if redis.call('ZREM', KEYS[1], m) == 1 then
-            local colon = string.find(m, ':', 1, true)
-            if colon then
-            local id = string.sub(m, 1, colon - 1)
-            local activity_key = 'activity:' .. id
-            local score = redis.call('HGET', activity_key, 'score')
-            if not score then score = now end
-            redis.call('ZADD', KEYS[2], score, m)
-            redis.call('HDEL', activity_key, 'processing_member', 'lease_deadline_ms')
-            table.insert(moved_ids, id)
+            -- Check if member is already in main queue to prevent duplicates
+            local existing_score = redis.call('ZSCORE', KEYS[2], m)
+            if existing_score == false then
+                -- Member not in main queue, safe to requeue
+                local colon = string.find(m, ':', 1, true)
+                if colon then
+                local id = string.sub(m, 1, colon - 1)
+                local activity_key = 'activity:' .. id
+                local score = redis.call('HGET', activity_key, 'score')
+                if not score then score = now end
+                redis.call('ZADD', KEYS[2], score, m)
+                redis.call('HDEL', activity_key, 'processing_member', 'lease_deadline_ms')
+                table.insert(moved_ids, id)
+                else
+                redis.call('ZADD', KEYS[2], now, m)
+                end
             else
-            redis.call('ZADD', KEYS[2], now, m)
+                -- Member already in main queue, skip ZADD but still clean up processing metadata
+                local colon = string.find(m, ':', 1, true)
+                if colon then
+                local id = string.sub(m, 1, colon - 1)
+                local activity_key = 'activity:' .. id
+                redis.call('HDEL', activity_key, 'processing_member', 'lease_deadline_ms')
+                table.insert(cleaned_ids, id)
+                end
             end
         end
         end
-        return moved_ids
+        return {moved_ids, cleaned_ids}
         "#;
 
-        let moved_ids: Vec<String> = redis::cmd("EVAL")
+        let result: (Vec<String>, Vec<String>) = redis::cmd("EVAL")
             .arg(lua)
             .arg(2)
             .arg(&processing_key)
@@ -1450,7 +1465,16 @@ impl ActivityQueueTrait for ActivityQueue {
             .await
             .map_err(|e| WorkerError::QueueError(format!("requeue_expired EVAL failed: {}", e)))?;
 
-        for id_str in &moved_ids {
+        let (moved_ids, cleaned_ids) = result;
+
+        // Process both requeued items and items that were already in main queue
+        let all_ids: Vec<String> = moved_ids
+            .iter()
+            .chain(cleaned_ids.iter())
+            .cloned()
+            .collect();
+
+        for id_str in &all_ids {
             if let Ok(activity_id) = uuid::Uuid::parse_str(id_str) {
                 if let Ok(mut snapshot) = self.load_snapshot(&mut conn, &activity_id).await {
                     let transition_at = Self::now();
