@@ -1,12 +1,10 @@
 use crate::activity::activity::{
-    Activity, ActivityFuture, ActivityHandler, ActivityHandlerRegistry,
-    ActivityOption, ActivityPriority, OnDuplicate,
+    Activity, ActivityFuture, ActivityHandler, ActivityHandlerRegistry, ActivityOption,
+    ActivityPriority, OnDuplicate,
 };
 use crate::config::WorkerConfig;
 use crate::observability::QueueInspector;
-use crate::queue::queue::{
-    ActivityQueue, ActivityQueueTrait, ActivityResult, ResultState,
-};
+use crate::queue::queue::{ActivityQueue, ActivityQueueTrait, ActivityResult, ResultState};
 use crate::runner::error::WorkerError;
 use crate::runner::redis::{create_redis_pool, create_redis_pool_with_config, RedisConfig};
 use crate::{ActivityContext, ActivityError};
@@ -1047,7 +1045,6 @@ impl WorkerEngineBuilder {
         self.metrics = Some(sink);
         self
     }
-
 
     /// Builds the WorkerEngine with the configured settings.
     ///

@@ -214,26 +214,31 @@ impl QueueInspector {
         let mut conn = self.connection().await?;
         let range = self.slice_to_range(offset, limit);
         let scheduled_key = self.scheduled_activities_key();
-        let activity_jsons: Vec<String> = conn
-            .zrange(&scheduled_key, *range.start(), *range.end())
+        let queue_entries: Vec<String> = conn
+            .zrange_withscores(&scheduled_key, *range.start(), *range.end())
             .await
             .map_err(Self::map_redis_error)?;
 
-        // Scheduled activities are stored as full Activity JSON objects, not uuid:json format
-        let mut snapshots = Vec::with_capacity(activity_jsons.len());
-        for activity_json in activity_jsons {
-            match serde_json::from_str::<Activity>(&activity_json) {
-                Ok(activity) => {
-                    // Try to load the snapshot first (which has the latest status)
-                    let snapshot = match self.load_snapshot(&mut conn, &activity.id).await? {
-                        Some(s) => s,
-                        None => ActivitySnapshot::from_activity(&activity),
-                    };
-                    snapshots.push(snapshot);
+        // Scheduled activities are stored in activity_id:activity_json format (same as main queue)
+        let mut snapshots = Vec::with_capacity(queue_entries.len());
+        for queue_entry in queue_entries {
+            // Parse queue entry format: activity_id:activity_json
+            if let Some((_, activity_json)) = queue_entry.split_once(':') {
+                match serde_json::from_str::<Activity>(activity_json) {
+                    Ok(activity) => {
+                        // Try to load the snapshot first (which has the latest status)
+                        let snapshot = match self.load_snapshot(&mut conn, &activity.id).await? {
+                            Some(s) => s,
+                            None => ActivitySnapshot::from_activity(&activity),
+                        };
+                        snapshots.push(snapshot);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to parse scheduled activity JSON");
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to parse scheduled activity JSON");
-                }
+            } else {
+                tracing::warn!("Invalid queue entry format in scheduled activities: missing colon");
             }
         }
 

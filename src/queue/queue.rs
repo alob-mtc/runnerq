@@ -988,11 +988,11 @@ impl ActivityQueueTrait for ActivityQueue {
 
                 // Extend lease if it's less than the timeout
                 if lease_ms / 1000 < activity.timeout_seconds {
-                    // let delta = activity.timeout_seconds - (lease_ms / 1000);
-                    // if delta > 0 {
-                    //     self.extend_lease(activity.id, Duration::from_secs(delta))
-                    //         .await?;
-                    // }
+                    let delta = activity.timeout_seconds - (lease_ms / 1000);
+                    if delta > 0 {
+                        self.extend_lease(activity.id, Duration::from_secs(delta))
+                            .await?;
+                    }
                 }
 
                 debug!(
@@ -1277,7 +1277,7 @@ impl ActivityQueueTrait for ActivityQueue {
             WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
         })?;
 
-        let activity_json = serde_json::to_string(&activity)?;
+        let queue_entry = self.create_queue_entry(&activity);
         let scheduled_key = self.get_scheduled_activities_key();
 
         let scheduled_at = activity
@@ -1286,8 +1286,9 @@ impl ActivityQueueTrait for ActivityQueue {
             .timestamp();
 
         // Add to sorted set with timestamp as score
+        // Store in activity_id:activity_json format (same as main queue)
         let _: () = conn
-            .zadd(&scheduled_key, activity_json, scheduled_at)
+            .zadd(&scheduled_key, queue_entry, scheduled_at)
             .await?;
 
         let mut snapshot = match self.load_snapshot(&mut conn, &activity.id).await {
@@ -1320,13 +1321,18 @@ impl ActivityQueueTrait for ActivityQueue {
 
     /// Process scheduled activities whose scheduled time has arrived.
     ///
-    /// This fetches up to 100 entries from the `scheduled_activities` sorted set with scores up to the current
-    /// Unix timestamp, removes each found entry from the scheduled set, deserializes it into an `Activity`,
-    /// sets its status to `Pending`, re-enqueues it on the main priority queue, and returns the list of
-    /// activities that were successfully processed.
+    /// This atomically moves scheduled activities to the main queue using a Lua script,
+    /// preventing duplicate processing in multi-node deployments and ensuring crash-proof operation.
     ///
-    /// Parsing errors for individual scheduled entries are logged and skipped; Redis and enqueue failures
-    /// propagate as `WorkerError::QueueError`.
+    /// The Lua script atomically:
+    /// 1. Gets activities ready to run (score <= now)
+    /// 2. For each activity, extracts activity_id and checks for stored score
+    /// 3. Atomically removes from scheduled set and adds to main queue
+    ///
+    /// After the atomic move, Rust code:
+    /// 1. Parses moved activities and calculates correct priority scores
+    /// 2. Updates scores if needed
+    /// 3. Updates snapshots and records lifecycle events
     ///
     /// # Returns
     ///
@@ -1349,27 +1355,109 @@ impl ActivityQueueTrait for ActivityQueue {
 
         let now = chrono::Utc::now().timestamp();
         let scheduled_key = self.get_scheduled_activities_key();
+        let main_key = self.get_main_queue_key();
 
-        // Get activities that are ready to run
-        let activity_jsons: Vec<String> = conn
-            .zrangebyscore_limit(&scheduled_key, 0, now, 0, 100)
-            .await?;
+        // Atomic Lua script to move scheduled activities to main queue
+        let lua = r#"
+        local now = tonumber(ARGV[1])
+        local limit = tonumber(ARGV[2])
+        local moved_entries = {}
+        local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, limit)
+
+        for _, m in ipairs(members) do
+            if redis.call('ZREM', KEYS[1], m) == 1 then
+                -- Check if member is already in main queue to prevent duplicates
+                local existing_score = redis.call('ZSCORE', KEYS[2], m)
+                if existing_score == false then
+                    -- Member not in main queue, safe to move
+                    local colon = string.find(m, ':', 1, true)
+                    if colon then
+                        local id = string.sub(m, 1, colon - 1)
+                        local activity_key = 'activity:' .. id
+                        local score = redis.call('HGET', activity_key, 'score')
+                        if not score then
+                            -- Use scheduled timestamp as fallback score
+                            score = now
+                        else
+                            -- Convert string score to number
+                            score = tonumber(score)
+                            if not score then
+                                score = now
+                            end
+                        end
+                        redis.call('ZADD', KEYS[2], score, m)
+                        table.insert(moved_entries, m)
+                    else
+                        -- Fallback: use now as score if format is unexpected
+                        redis.call('ZADD', KEYS[2], now, m)
+                        table.insert(moved_entries, m)
+                    end
+                end
+            end
+        end
+        return moved_entries
+        "#;
+
+        let moved_entries: Vec<String> = redis::cmd("EVAL")
+            .arg(lua)
+            .arg(2)
+            .arg(&scheduled_key)
+            .arg(&main_key)
+            .arg(now)
+            .arg(100i64)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| WorkerError::QueueError(format!("process_scheduled_activities EVAL failed: {}", e)))?;
 
         let mut ready_activities = Vec::new();
 
-        for activity_json in activity_jsons {
-            // Remove from scheduled set
-            let _: () = conn.zrem(&scheduled_key, &activity_json).await?;
-
-            // Parse and enqueue activity
-            match serde_json::from_str::<Activity>(&activity_json) {
+        // Parse moved activities and update scores if needed
+        for queue_entry in moved_entries {
+            match self.parse_queue_entry(&queue_entry) {
                 Ok(mut activity) => {
+                    // Calculate correct priority score
+                    let correct_score = self.calculate_priority_score(&activity.priority, activity.created_at);
+                    
+                    // Check current score in queue and update if needed
+                    let current_score: Option<f64> = conn.zscore(&main_key, &queue_entry).await?;
+                    if current_score.map(|s| (s - correct_score).abs() > 0.001).unwrap_or(true) {
+                        // Score differs or doesn't exist, update it
+                        let _: () = conn.zadd(&main_key, &queue_entry, correct_score).await?;
+                    }
+
+                    // Update activity status to Pending in snapshot
                     activity.status = ActivityStatus::Pending;
-                    self.enqueue(activity.clone()).await?;
+                    let mut snapshot = match self.load_snapshot(&mut conn, &activity.id).await {
+                        Ok(s) => s,
+                        Err(_) => ActivitySnapshot::from_activity(&activity),
+                    };
+                    let transition_at = Self::now();
+                    snapshot.update_status(ActivityStatus::Pending, transition_at);
+                    snapshot.set_current_worker_id(None);
+                    snapshot.processing_member = None;
+                    snapshot.lease_deadline_ms = None;
+                    snapshot.score = Some(correct_score);
+                    self.write_snapshot(&mut conn, &snapshot).await.ok();
+
+                    // Record lifecycle event
+                    self.record_event(
+                        &mut conn,
+                        &activity.id,
+                        ActivityEventType::Enqueued,
+                        None,
+                        Some(json!({
+                            "priority": snapshot.priority,
+                            "scheduled_at": snapshot.scheduled_at,
+                            "from": "scheduled",
+                        })),
+                    )
+                    .await
+                    .ok();
+
                     ready_activities.push(activity);
                 }
                 Err(e) => {
-                    error!(error = %e, "Failed to parse scheduled activity");
+                    error!(error = %e, "Failed to parse scheduled activity queue entry");
                 }
             }
         }
@@ -1377,7 +1465,7 @@ impl ActivityQueueTrait for ActivityQueue {
         if !ready_activities.is_empty() {
             info!(
                 count = ready_activities.len(),
-                "Processed scheduled activities with optimized queue"
+                "Processed scheduled activities with atomic move"
             );
         }
 
