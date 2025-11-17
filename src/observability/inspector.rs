@@ -215,7 +215,7 @@ impl QueueInspector {
         let range = self.slice_to_range(offset, limit);
         let scheduled_key = self.scheduled_activities_key();
         let queue_entries: Vec<String> = conn
-            .zrange_withscores(&scheduled_key, *range.start(), *range.end())
+            .zrange(&scheduled_key, *range.start(), *range.end())
             .await
             .map_err(Self::map_redis_error)?;
 
