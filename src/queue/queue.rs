@@ -1287,9 +1287,7 @@ impl ActivityQueueTrait for ActivityQueue {
 
         // Add to sorted set with timestamp as score
         // Store in activity_id:activity_json format (same as main queue)
-        let _: () = conn
-            .zadd(&scheduled_key, queue_entry, scheduled_at)
-            .await?;
+        let _: () = conn.zadd(&scheduled_key, queue_entry, scheduled_at).await?;
 
         let mut snapshot = match self.load_snapshot(&mut conn, &activity.id).await {
             Ok(s) => s,
@@ -1407,7 +1405,9 @@ impl ActivityQueueTrait for ActivityQueue {
             .arg(100i64)
             .query_async(&mut *conn)
             .await
-            .map_err(|e| WorkerError::QueueError(format!("process_scheduled_activities EVAL failed: {}", e)))?;
+            .map_err(|e| {
+                WorkerError::QueueError(format!("process_scheduled_activities EVAL failed: {}", e))
+            })?;
 
         let mut ready_activities = Vec::new();
 
@@ -1416,11 +1416,15 @@ impl ActivityQueueTrait for ActivityQueue {
             match self.parse_queue_entry(&queue_entry) {
                 Ok(mut activity) => {
                     // Calculate correct priority score
-                    let correct_score = self.calculate_priority_score(&activity.priority, activity.created_at);
-                    
+                    let correct_score =
+                        self.calculate_priority_score(&activity.priority, activity.created_at);
+
                     // Check current score in queue and update if needed
                     let current_score: Option<f64> = conn.zscore(&main_key, &queue_entry).await?;
-                    if current_score.map(|s| (s - correct_score).abs() > 0.001).unwrap_or(true) {
+                    if current_score
+                        .map(|s| (s - correct_score).abs() > 0.001)
+                        .unwrap_or(true)
+                    {
                         // Score differs or doesn't exist, update it
                         let _: () = conn.zadd(&main_key, &queue_entry, correct_score).await?;
                     }
@@ -1465,7 +1469,7 @@ impl ActivityQueueTrait for ActivityQueue {
         if !ready_activities.is_empty() {
             info!(
                 count = ready_activities.len(),
-                "Processed scheduled activities with atomic move"
+                "Processed scheduled activities"
             );
         }
 
