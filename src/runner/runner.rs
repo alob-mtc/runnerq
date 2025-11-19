@@ -1255,17 +1255,18 @@ impl<'a> ActivityBuilder<'a> {
             || self.delay.is_some()
             || self.idempotency_key.is_some()
         {
-            let idempotency_key = self.idempotency_key.unwrap();
-            let idempotency_key = (
-                format!("{}-{}", idempotency_key.0, self.activity_type),
-                idempotency_key.1,
-            );
+            let idempotency_key = self.idempotency_key.map(|(key, behavior)| {
+                (
+                    format!("{}-{}", key, self.activity_type),
+                    behavior,
+                )
+            });
             Some(ActivityOption {
                 priority: self.priority,
                 max_retries: self.max_retries.unwrap_or(3),
                 timeout_seconds: self.timeout.map(|d| d.as_secs()).unwrap_or(300),
                 delay_seconds: self.delay.map(|d| d.as_secs()),
-                idempotency_key: Some(idempotency_key),
+                idempotency_key,
             })
         } else {
             None
