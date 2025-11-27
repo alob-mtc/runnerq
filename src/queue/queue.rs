@@ -120,6 +120,7 @@ impl ActivityQueue {
     const IDEMPOTENCY_KEY_TTL_SECONDS: i64 = 24 * 60 * 60;
     const EVENT_TTL_SECONDS: i64 = 60;
     const EVENT_MAX_LEN: isize = 100;
+    const MAX_RETRY_DELAY_SECONDS: u64 = 60 * 60; // 1 hour
 
     /// Creates a new ActivityQueue backed by the given Redis connection pool and using `queue_name` as the key prefix.
     ///
@@ -988,11 +989,12 @@ impl ActivityQueueTrait for ActivityQueue {
 
                 // Extend lease if it's less than the timeout
                 if lease_ms / 1000 < activity.timeout_seconds {
-                    // let delta = activity.timeout_seconds - (lease_ms / 1000);
-                    // if delta > 0 {
-                    //     self.extend_lease(activity.id, Duration::from_secs(delta))
-                    //         .await?;
-                    // }
+                    let delta = activity.timeout_seconds - (lease_ms / 1000);
+                    if delta > 0 {
+                        let lease_buffer = 10; // 10 seconds buffer to avoid race conditions
+                        self.extend_lease(activity.id, Duration::from_secs(delta + lease_buffer))
+                            .await?;
+                    }
                 }
 
                 debug!(
@@ -1108,7 +1110,7 @@ impl ActivityQueueTrait for ActivityQueue {
     /// If `retryable` is false the activity status is set to `Failed`. If `retryable` is true and the activity has
     /// remaining retries (either `max_retries == 0` meaning unlimited or `retry_count < max_retries`), the function
     /// increments `retry_count`, sets the status to `Retrying`, computes an exponential backoff delay as
-    /// `retry_delay_seconds * 2.pow(retry_count)`, sets `scheduled_at` to now + delay, and schedules the activity.
+    /// `retry_delay_seconds * 2.pow(retry_count)` (capped at 1 hour), sets `scheduled_at` to now + delay, and schedules the activity.
     /// When retries are exhausted the status is set to `DeadLetter` and the activity is pushed to the dead-letter queue.
     ///
     /// Returns `Ok(())` on success or a `WorkerError::QueueError` if underlying Redis operations fail.
@@ -1190,9 +1192,9 @@ impl ActivityQueueTrait for ActivityQueue {
             retry_activity.retry_count += 1;
             retry_activity.status = ActivityStatus::Retrying;
 
-            // Add exponential backoff delay
-            let delay_seconds =
-                retry_activity.retry_delay_seconds * 2_u64.pow(retry_activity.retry_count);
+            // Add exponential backoff delay, capped at 1 hour
+            let delay_seconds = (retry_activity.retry_delay_seconds * 2_u64.pow(retry_activity.retry_count))
+                .min(Self::MAX_RETRY_DELAY_SECONDS);
             let scheduled_at = chrono::Utc::now() + chrono::Duration::seconds(delay_seconds as i64);
             retry_activity.scheduled_at = Some(scheduled_at);
 
@@ -1586,6 +1588,12 @@ impl ActivityQueueTrait for ActivityQueue {
         )
         .await?;
 
+        debug!(
+            activity_id = %activity_id,
+            new_deadline_ms = %new_deadline,
+            extend_by_ms = %extend_ms,
+            "Lease extended successfully"
+        );
         Ok(new_deadline > 0)
     }
 
