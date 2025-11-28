@@ -587,6 +587,9 @@ impl WorkerEngine {
                     )),
                 };
 
+                // Save payload for potential dead letter callback
+                let payload_for_dead_letter = activity.payload.clone();
+
                 let activity_timeout = Duration::from_secs(activity.timeout_seconds);
                 let handle_fut = handler.handle(activity.payload.clone(), context);
 
@@ -637,11 +640,30 @@ impl WorkerEngine {
                     Ok(Err(ActivityError::Retry(reason))) => {
                         metrics.inc_counter("activity_retry", 1);
                         warn!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity requesting retry");
-                        if let Err(e) = activity_queue
-                            .mark_failed(activity, reason, true, Some(worker_label.as_str()))
+                        match activity_queue
+                            .mark_failed(activity, reason.clone(), true, Some(worker_label.as_str()))
                             .await
                         {
-                            error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity for retry");
+                            Ok(true) => {
+                                // Activity was dead-lettered, call the callback
+                                let dead_letter_context = ActivityContext {
+                                    activity_id,
+                                    activity_type: activity_type.clone(),
+                                    retry_count: 0, // Not relevant for dead letter callback
+                                    metadata: Default::default(),
+                                    cancel_token: cancel_token.child_token(),
+                                    activity_executor: Arc::new(WorkerEngineWrapper::new(
+                                        activity_queue_for_context.clone(),
+                                    )),
+                                };
+                                handler.on_dead_letter(payload_for_dead_letter.clone(), dead_letter_context, reason).await;
+                            }
+                            Ok(false) => {
+                                // Activity was retried or failed, no callback needed
+                            }
+                            Err(e) => {
+                                error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity for retry");
+                            }
                         }
                     }
                     Ok(Err(ActivityError::NonRetry(reason))) => {
@@ -677,11 +699,30 @@ impl WorkerEngine {
                         metrics.inc_counter("activity_timeout", 1);
                         let error_msg = "Activity execution timed out".to_string();
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, timeout = ?activity_timeout, "Activity timed out");
-                        if let Err(e) = activity_queue
-                            .mark_failed(activity, error_msg, true, Some(worker_label.as_str()))
+                        match activity_queue
+                            .mark_failed(activity, error_msg.clone(), true, Some(worker_label.as_str()))
                             .await
                         {
-                            error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
+                            Ok(true) => {
+                                // Activity was dead-lettered, call the callback
+                                let dead_letter_context = ActivityContext {
+                                    activity_id,
+                                    activity_type: activity_type.clone(),
+                                    retry_count: 0,
+                                    metadata: Default::default(),
+                                    cancel_token: cancel_token.child_token(),
+                                    activity_executor: Arc::new(WorkerEngineWrapper::new(
+                                        activity_queue_for_context.clone(),
+                                    )),
+                                };
+                                handler.on_dead_letter(payload_for_dead_letter.clone(), dead_letter_context, error_msg).await;
+                            }
+                            Ok(false) => {
+                                // Activity was retried, no callback needed
+                            }
+                            Err(e) => {
+                                error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
+                            }
                         }
                     }
                 }

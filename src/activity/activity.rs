@@ -372,6 +372,30 @@ pub trait ActivityHandler: Send + Sync {
     /// This string is used to match activities with their handlers when they are
     /// registered with the worker engine. It should be unique and descriptive.
     fn activity_type(&self) -> String;
+
+    /// Called once when an activity enters the dead letter state.
+    ///
+    /// This callback is triggered when an activity has exhausted all retry attempts
+    /// or encountered a non-retryable error. Use this for cleanup, notifications,
+    /// or any final handling needed when an activity permanently fails.
+    ///
+    /// # Parameters
+    ///
+    /// * `payload` - The original JSON payload of the activity
+    /// * `context` - Execution context with metadata and utilities
+    /// * `error` - The error message that caused the activity to enter dead letter
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation does nothing, making this callback optional
+    /// for backwards compatibility.
+    async fn on_dead_letter(
+        &self,
+        _payload: serde_json::Value,
+        _context: ActivityContext,
+        _error: String,
+    ) {
+    }
 }
 
 /// Registry for Activity handlers
