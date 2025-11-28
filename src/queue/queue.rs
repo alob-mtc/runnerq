@@ -37,14 +37,17 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
         worker_id: Option<&str>,
     ) -> Result<(), WorkerError>;
 
-    /// Mark a activity as failed and optionally requeue for retry
+    /// Mark a activity as failed and optionally requeue for retry.
+    ///
+    /// Returns `Ok(true)` if the activity was moved to dead letter queue,
+    /// `Ok(false)` if it was retried or marked as failed without dead-lettering.
     async fn mark_failed(
         &self,
         activity: Activity,
         error_message: String,
         retryable: bool,
         worker_id: Option<&str>,
-    ) -> Result<(), WorkerError>;
+    ) -> Result<bool, WorkerError>;
 
     /// Schedule an activity for future execution
     async fn schedule_activity(&self, activity: Activity) -> Result<(), WorkerError>;
@@ -1143,7 +1146,7 @@ impl ActivityQueueTrait for ActivityQueue {
         error_message: String,
         retryable: bool,
         worker_id: Option<&str>,
-    ) -> Result<(), WorkerError> {
+    ) -> Result<bool, WorkerError> {
         let activity_id = activity.id;
 
         let mut conn = self.redis_pool.get().await.map_err(|e| {
@@ -1183,7 +1186,7 @@ impl ActivityQueueTrait for ActivityQueue {
                 })),
             )
             .await?;
-            return Ok(());
+            return Ok(false);
         }
 
         if activity.max_retries == 0 || activity.retry_count < activity.max_retries {
@@ -1221,6 +1224,7 @@ impl ActivityQueueTrait for ActivityQueue {
             .await?;
             self.schedule_activity(retry_activity).await?;
             info!(activity_id = %activity_id, retry_count = retry_count, "Activity scheduled for retry");
+            Ok(false)
         } else {
             // Move to dead letter queue
             self.ack_processing(&activity_id).await?;
@@ -1244,9 +1248,8 @@ impl ActivityQueueTrait for ActivityQueue {
             self.add_to_dead_letter_queue(activity.clone(), dead_letter_error)
                 .await?;
             error!(activity_id = %activity_id, "Activity moved to dead letter queue");
+            Ok(true)
         }
-
-        Ok(())
     }
 
     /// Schedule an activity for future execution by adding it to the Redis `scheduled_activities` ZSET.
@@ -1503,6 +1506,18 @@ impl ActivityQueueTrait for ActivityQueue {
         Ok(moved_ids.len() as u64)
     }
 
+    async fn evaluate_idempotency_rule(
+        &self,
+        activity: &Activity,
+    ) -> Result<Option<uuid::Uuid>, WorkerError> {
+        let mut conn = self.redis_pool.get().await.map_err(|e| {
+            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
+        })?;
+
+        self.evaluate_idempotency_rule_for_enqueue(&mut conn, activity)
+            .await
+    }
+
     /// Extend the lease for an activity in the processing ZSET.
     ///
     /// This function extends the lease for an activity in the processing ZSET by the specified duration.
@@ -1689,18 +1704,6 @@ impl ActivityQueueTrait for ActivityQueue {
             }
             None => Ok(None),
         }
-    }
-
-    async fn evaluate_idempotency_rule(
-        &self,
-        activity: &Activity,
-    ) -> Result<Option<uuid::Uuid>, WorkerError> {
-        let mut conn = self.redis_pool.get().await.map_err(|e| {
-            WorkerError::QueueError(format!("Failed to get Redis connection: {}", e))
-        })?;
-
-        self.evaluate_idempotency_rule_for_enqueue(&mut conn, activity)
-            .await
     }
 }
 
