@@ -10,6 +10,10 @@ struct TestActivity;
 
 #[async_trait]
 impl ActivityHandler for TestActivity {
+    fn activity_type(&self) -> String {
+        "test_activity".to_string()
+    }
+
     async fn handle(
         &self,
         payload: serde_json::Value,
@@ -19,10 +23,6 @@ impl ActivityHandler for TestActivity {
         tokio::time::sleep(Duration::from_secs(5)).await;
         println!("✅ Completed test activity");
         Ok(Some(serde_json::json!({"status": "completed"})))
-    }
-
-    fn activity_type(&self) -> String {
-        "test_activity".to_string()
     }
 }
 
