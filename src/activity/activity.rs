@@ -344,6 +344,12 @@ pub type ActivityHandlerResult<T = Option<serde_json::Value>> = Result<T, Activi
 /// ```
 #[async_trait]
 pub trait ActivityHandler: Send + Sync {
+    /// Return the activity type string that this handler processes.
+    ///
+    /// This string is used to match activities with their handlers when they are
+    /// registered with the worker engine. It should be unique and descriptive.
+    fn activity_type(&self) -> String;
+    
     /// Process the activity with the given payload and context.
     ///
     /// This method is called by the worker engine to execute the activity.
@@ -366,12 +372,6 @@ pub trait ActivityHandler: Send + Sync {
         payload: serde_json::Value,
         context: ActivityContext,
     ) -> ActivityHandlerResult;
-
-    /// Return the activity type string that this handler processes.
-    ///
-    /// This string is used to match activities with their handlers when they are
-    /// registered with the worker engine. It should be unique and descriptive.
-    fn activity_type(&self) -> String;
 
     /// Called once when an activity enters the dead letter state.
     ///
