@@ -1111,7 +1111,7 @@ impl ActivityQueueTrait for ActivityQueue {
     /// Handle a failed activity by either scheduling a retry with exponential backoff or moving it to the dead-letter queue.
     ///
     /// If `retryable` is false the activity status is set to `Failed`. If `retryable` is true and the activity has
-    /// remaining retries (either `max_retries == 0` meaning unlimited or `retry_count < max_retries`), the function
+    /// remaining retries (either `max_retries == 0` meaning unlimited or `retry_count + 1 < max_retries`), the function
     /// increments `retry_count`, sets the status to `Retrying`, computes an exponential backoff delay as
     /// `retry_delay_seconds * 2.pow(retry_count)` (capped at 1 hour), sets `scheduled_at` to now + delay, and schedules the activity.
     /// When retries are exhausted the status is set to `DeadLetter` and the activity is pushed to the dead-letter queue.
@@ -1189,7 +1189,7 @@ impl ActivityQueueTrait for ActivityQueue {
             return Ok(false);
         }
 
-        if activity.max_retries == 0 || activity.retry_count < activity.max_retries {
+        if activity.max_retries == 0 || activity.retry_count + 1 < activity.max_retries {
             // Requeue for retry with updated count
             let mut retry_activity = activity;
             retry_activity.retry_count += 1;
