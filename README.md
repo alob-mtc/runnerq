@@ -769,6 +769,40 @@ impl ActivityHandler for MyActivity {
 - `ActivityError::NonRetry(message)` - Will not be retried, goes to dead letter queue
 - Any error implementing `Into<ActivityError>` can be used with `?`
 
+### Dead Letter Callback
+
+When an activity exhausts all retries or encounters a non-retryable error, it moves to the dead letter queue. You can handle this event by implementing the optional `on_dead_letter` callback:
+
+```rust
+use runner_q::{ActivityHandler, ActivityContext, ActivityHandlerResult};
+use async_trait::async_trait;
+
+#[async_trait]
+impl ActivityHandler for MyActivity {
+    async fn handle(&self, payload: serde_json::Value, context: ActivityContext) -> ActivityHandlerResult {
+        // Activity logic
+        Ok(None)
+    }
+
+    fn activity_type(&self) -> String {
+        "my_activity".to_string()
+    }
+
+    async fn on_dead_letter(
+        &self,
+        payload: serde_json::Value,
+        context: ActivityContext,
+        error: String,
+    ) {
+        // Called once when activity enters dead letter state
+        // Use for cleanup, notifications, or logging
+        eprintln!("Activity {} dead-lettered: {}", context.activity_id, error);
+    }
+}
+```
+
+The callback has a default empty implementation, so existing handlers continue to work without modification.
+
 ### Worker Engine Errors
 
 ```rust
