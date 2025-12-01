@@ -766,12 +766,12 @@ impl ActivityHandler for MyActivity {
 
 **Error Types:**
 - `ActivityError::Retry(message)` - Will be retried with exponential backoff
-- `ActivityError::NonRetry(message)` - Will not be retried, goes to dead letter queue
+- `ActivityError::NonRetry(message)` - Will not be retried
 - Any error implementing `Into<ActivityError>` can be used with `?`
 
 ### Dead Letter Callback
 
-When an activity exhausts all retries or encounters a non-retryable error, it moves to the dead letter queue. You can handle this event by implementing the optional `on_dead_letter` callback:
+When an activity exhausts all retries, it moves to the dead letter queue. You can handle this event by implementing the optional `on_dead_letter` callback:
 
 ```rust
 use runner_q::{ActivityHandler, ActivityContext, ActivityHandlerResult};
