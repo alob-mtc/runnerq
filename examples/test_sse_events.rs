@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use axum::{serve, Router};
-use runner_q::{runnerq_ui, ActivityContext, ActivityHandler, ActivityHandlerResult, WorkerEngine};
+use runner_q::{
+    runnerq_ui, ActivityContext, ActivityHandler, ActivityHandlerResult, RedisBackend, WorkerEngine,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
@@ -39,14 +41,19 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
-
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
-    // Build worker engine
-    let mut engine = WorkerEngine::builder()
+    // Custom backend
+    let backend = RedisBackend::builder()
         .redis_url(&redis_url)
         .queue_name("test_sse")
+        .build()
+        .await?;
+
+    // Build worker engine
+    let mut engine = WorkerEngine::builder()
+        .backend(Arc::new(backend))
         .max_workers(2)
         .build()
         .await?;
@@ -87,7 +94,10 @@ async fn main() -> anyhow::Result<()> {
                     "counter": counter,
                     "timestamp": chrono::Utc::now().to_rfc3339()
                 }))
-                .idempotency_key("key", runner_q::OnDuplicate::ReturnExisting)
+                .idempotency_key(
+                    uuid::Uuid::new_v4().to_string(),
+                    runner_q::OnDuplicate::ReturnExisting,
+                )
                 .execute()
                 .await
             {

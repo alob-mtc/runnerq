@@ -1,4 +1,5 @@
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bb8_redis::{
@@ -13,22 +14,40 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::activity::activity::{Activity, ActivityStatus};
+use crate::backend::Backend;
 use crate::queue::queue::{ActivityEvent, ActivitySnapshot, QueueStats};
 use crate::runner::error::WorkerError;
 
+/// Queue inspector for observability operations.
+///
+/// This struct provides read-only access to queue state for monitoring and debugging.
+/// It can be created from either a Redis connection pool or a custom backend.
 #[derive(Clone)]
 pub struct QueueInspector {
-    redis_pool: Pool<RedisConnectionManager>,
+    redis_pool: Option<Pool<RedisConnectionManager>>,
     queue_name: String,
     max_workers: Option<usize>,
+    backend: Option<Arc<dyn Backend>>,
 }
 
 impl QueueInspector {
+    /// Create a new inspector from a Redis connection pool.
     pub fn new(redis_pool: Pool<RedisConnectionManager>, queue_name: impl Into<String>) -> Self {
         Self {
-            redis_pool,
+            redis_pool: Some(redis_pool),
             queue_name: queue_name.into(),
             max_workers: None,
+            backend: None,
+        }
+    }
+
+    /// Create a new inspector from a custom backend.
+    pub fn from_backend(backend: Arc<dyn Backend>) -> Self {
+        Self {
+            redis_pool: None,
+            queue_name: String::new(),
+            max_workers: None,
+            backend: Some(backend),
         }
     }
 
@@ -43,17 +62,39 @@ impl QueueInspector {
     /// It's designed to be used directly with SSE endpoints, bypassing in-memory channels.
     /// This enables cross-process event streaming.
     pub fn event_stream(&self) -> impl Stream<Item = Result<ActivityEvent, WorkerError>> {
+        // If using backend, delegate to it
+        if let Some(ref backend) = self.backend {
+            let backend_stream = backend.event_stream();
+            return futures::stream::StreamExt::left_stream(backend_stream.map(|r| {
+                r.map(Self::convert_backend_event)
+                    .map_err(WorkerError::from)
+            }));
+        }
+
         let redis_pool = self.redis_pool.clone();
         let stream_key = format!("{}:events_stream", self.queue_name);
         let queue_name = self.queue_name.clone();
 
-        futures::stream::unfold(
+        let stream = futures::stream::unfold(
             (redis_pool, stream_key, queue_name, "$".to_string()),
             move |state| async move {
                 let (pool, key, qn, mut last_id) = state;
 
-                // Get Redis connection
-                let mut conn = match pool.get().await {
+                // Get Redis connection from Option<Pool>
+                let pool_ref = match &pool {
+                    Some(p) => p,
+                    None => {
+                        // No pool available, return error
+                        return Some((
+                            Err(WorkerError::QueueError(
+                                "No Redis pool available".to_string(),
+                            )),
+                            (pool.clone(), key.clone(), qn.clone(), last_id),
+                        ));
+                    }
+                };
+
+                let mut conn = match pool_ref.get().await {
                     Ok(conn) => conn,
                     Err(e) => {
                         error!(
@@ -175,7 +216,9 @@ impl QueueInspector {
                     None
                 }
             }
-        })
+        });
+
+        futures::stream::StreamExt::right_stream(stream)
     }
 
     pub async fn list_pending(
@@ -183,6 +226,18 @@ impl QueueInspector {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ActivitySnapshot>, WorkerError> {
+        // Delegate to backend if available
+        if let Some(ref backend) = self.backend {
+            let snapshots = backend
+                .list_pending(offset, limit)
+                .await
+                .map_err(WorkerError::from)?;
+            return Ok(snapshots
+                .into_iter()
+                .map(Self::convert_backend_snapshot)
+                .collect());
+        }
+
         let mut conn = self.connection().await?;
         let range = self.slice_to_range(offset, limit);
         let members: Vec<String> = conn
@@ -197,6 +252,17 @@ impl QueueInspector {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ActivitySnapshot>, WorkerError> {
+        if let Some(ref backend) = self.backend {
+            let snapshots = backend
+                .list_processing(offset, limit)
+                .await
+                .map_err(WorkerError::from)?;
+            return Ok(snapshots
+                .into_iter()
+                .map(Self::convert_backend_snapshot)
+                .collect());
+        }
+
         let mut conn = self.connection().await?;
         let range = self.slice_to_range(offset, limit);
         let members: Vec<String> = conn
@@ -211,6 +277,17 @@ impl QueueInspector {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ActivitySnapshot>, WorkerError> {
+        if let Some(ref backend) = self.backend {
+            let snapshots = backend
+                .list_scheduled(offset, limit)
+                .await
+                .map_err(WorkerError::from)?;
+            return Ok(snapshots
+                .into_iter()
+                .map(Self::convert_backend_snapshot)
+                .collect());
+        }
+
         let mut conn = self.connection().await?;
         let range = self.slice_to_range(offset, limit);
         let scheduled_key = self.scheduled_activities_key();
@@ -245,6 +322,17 @@ impl QueueInspector {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<DeadLetterRecord>, WorkerError> {
+        if let Some(ref backend) = self.backend {
+            let records = backend
+                .list_dead_letter(offset, limit)
+                .await
+                .map_err(WorkerError::from)?;
+            return Ok(records
+                .into_iter()
+                .map(Self::convert_backend_dead_letter)
+                .collect());
+        }
+
         let mut conn = self.connection().await?;
         let range = self.slice_to_range(offset, limit);
         let dead_letter_key = self.dead_letter_queue_key();
@@ -280,6 +368,17 @@ impl QueueInspector {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ActivitySnapshot>, WorkerError> {
+        if let Some(ref backend) = self.backend {
+            let snapshots = backend
+                .list_completed(offset, limit)
+                .await
+                .map_err(WorkerError::from)?;
+            return Ok(snapshots
+                .into_iter()
+                .map(Self::convert_backend_snapshot)
+                .collect());
+        }
+
         let mut conn = self.connection().await?;
         let completed_key = self.completed_activities_key();
 
@@ -307,6 +406,14 @@ impl QueueInspector {
         &self,
         activity_id: Uuid,
     ) -> Result<Option<ActivitySnapshot>, WorkerError> {
+        if let Some(ref backend) = self.backend {
+            return backend
+                .get_activity(activity_id)
+                .await
+                .map(|opt| opt.map(Self::convert_backend_snapshot))
+                .map_err(WorkerError::from);
+        }
+
         let mut conn = self.connection().await?;
         self.load_snapshot(&mut conn, &activity_id).await
     }
@@ -315,6 +422,14 @@ impl QueueInspector {
         &self,
         activity_id: Uuid,
     ) -> Result<Option<serde_json::Value>, WorkerError> {
+        if let Some(ref backend) = self.backend {
+            return backend
+                .get_result(activity_id)
+                .await
+                .map(|opt| opt.and_then(|r| r.data))
+                .map_err(WorkerError::from);
+        }
+
         let mut conn = self.connection().await?;
         let result_key = format!("result:{}", activity_id);
         let result_json: Option<String> =
@@ -336,6 +451,17 @@ impl QueueInspector {
         activity_id: Uuid,
         limit: usize,
     ) -> Result<Vec<ActivityEvent>, WorkerError> {
+        if let Some(ref backend) = self.backend {
+            let events = backend
+                .get_activity_events(activity_id, limit)
+                .await
+                .map_err(WorkerError::from)?;
+            return Ok(events
+                .into_iter()
+                .map(Self::convert_backend_event)
+                .collect());
+        }
+
         let mut conn = self.connection().await?;
         let start = -(limit as isize);
         let raw_events: Vec<String> = conn
@@ -357,6 +483,22 @@ impl QueueInspector {
     }
 
     pub async fn stats(&self) -> Result<QueueStats, WorkerError> {
+        // Delegate to backend if available
+        if let Some(ref backend) = self.backend {
+            let backend_stats = backend.stats().await.map_err(WorkerError::from)?;
+            return Ok(QueueStats {
+                pending_activities: backend_stats.pending,
+                processing_activities: backend_stats.processing,
+                critical_priority: backend_stats.by_priority.critical,
+                high_priority: backend_stats.by_priority.high,
+                normal_priority: backend_stats.by_priority.normal,
+                low_priority: backend_stats.by_priority.low,
+                scheduled_activities: backend_stats.scheduled,
+                dead_letter_activities: backend_stats.dead_letter,
+                max_workers: self.max_workers.or(backend_stats.max_workers),
+            });
+        }
+
         let mut conn = self.connection().await?;
 
         let queue_key = self.main_queue_key();
@@ -488,6 +630,8 @@ impl QueueInspector {
         &self,
     ) -> Result<PooledConnection<'_, RedisConnectionManager>, WorkerError> {
         self.redis_pool
+            .as_ref()
+            .ok_or_else(|| WorkerError::QueueError("No Redis pool available".to_string()))?
             .get()
             .await
             .map_err(|e| WorkerError::QueueError(format!("Failed to get Redis connection: {}", e)))
@@ -529,6 +673,89 @@ impl QueueInspector {
 
     fn map_redis_error(err: redis::RedisError) -> WorkerError {
         WorkerError::QueueError(format!("Redis error: {}", err))
+    }
+
+    /// Convert a backend ActivitySnapshot to a queue ActivitySnapshot
+    fn convert_backend_snapshot(snapshot: crate::backend::ActivitySnapshot) -> ActivitySnapshot {
+        ActivitySnapshot {
+            id: snapshot.id,
+            activity_type: snapshot.activity_type,
+            payload: snapshot.payload,
+            priority: snapshot.priority,
+            status: snapshot.status,
+            created_at: snapshot.created_at,
+            scheduled_at: snapshot.scheduled_at,
+            started_at: snapshot.started_at,
+            completed_at: snapshot.completed_at,
+            current_worker_id: snapshot.current_worker_id,
+            last_worker_id: snapshot.last_worker_id,
+            retry_count: snapshot.retry_count,
+            max_retries: snapshot.max_retries,
+            timeout_seconds: snapshot.timeout_seconds,
+            retry_delay_seconds: snapshot.retry_delay_seconds,
+            metadata: snapshot.metadata,
+            last_error: snapshot.last_error,
+            last_error_at: snapshot.last_error_at,
+            status_updated_at: snapshot.status_updated_at,
+            score: None,
+            lease_deadline_ms: None,
+            processing_member: None,
+            idempotency_key: snapshot.idempotency_key,
+        }
+    }
+
+    /// Convert a backend DeadLetterRecord to a local DeadLetterRecord
+    fn convert_backend_dead_letter(record: crate::backend::DeadLetterRecord) -> DeadLetterRecord {
+        DeadLetterRecord {
+            activity: Self::convert_backend_snapshot(record.activity),
+            error: record.error,
+            failed_at: record.failed_at,
+        }
+    }
+
+    /// Convert a backend ActivityEvent to a queue ActivityEvent
+    fn convert_backend_event(event: crate::backend::ActivityEvent) -> ActivityEvent {
+        ActivityEvent {
+            activity_id: event.activity_id,
+            timestamp: event.timestamp,
+            event_type: match event.event_type {
+                crate::backend::ActivityEventType::Enqueued => {
+                    crate::queue::queue::ActivityEventType::Enqueued
+                }
+                crate::backend::ActivityEventType::Scheduled => {
+                    crate::queue::queue::ActivityEventType::Scheduled
+                }
+                crate::backend::ActivityEventType::Dequeued => {
+                    crate::queue::queue::ActivityEventType::Dequeued
+                }
+                crate::backend::ActivityEventType::Started => {
+                    crate::queue::queue::ActivityEventType::Started
+                }
+                crate::backend::ActivityEventType::Completed => {
+                    crate::queue::queue::ActivityEventType::Completed
+                }
+                crate::backend::ActivityEventType::Failed => {
+                    crate::queue::queue::ActivityEventType::Failed
+                }
+                crate::backend::ActivityEventType::Retrying => {
+                    crate::queue::queue::ActivityEventType::Retrying
+                }
+                crate::backend::ActivityEventType::DeadLetter => {
+                    crate::queue::queue::ActivityEventType::DeadLetter
+                }
+                crate::backend::ActivityEventType::Requeued => {
+                    crate::queue::queue::ActivityEventType::Requeued
+                }
+                crate::backend::ActivityEventType::LeaseExtended => {
+                    crate::queue::queue::ActivityEventType::LeaseExtended
+                }
+                crate::backend::ActivityEventType::ResultStored => {
+                    crate::queue::queue::ActivityEventType::ResultStored
+                }
+            },
+            worker_id: event.worker_id,
+            detail: event.detail,
+        }
     }
 }
 

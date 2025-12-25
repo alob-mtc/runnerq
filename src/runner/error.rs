@@ -1,3 +1,4 @@
+use crate::backend::BackendError;
 use redis::RedisError;
 use thiserror::Error;
 
@@ -52,6 +53,22 @@ pub enum WorkerError {
 impl From<RedisError> for WorkerError {
     fn from(err: RedisError) -> Self {
         WorkerError::RedisError(err.to_string())
+    }
+}
+
+impl From<BackendError> for WorkerError {
+    fn from(err: BackendError) -> Self {
+        match err {
+            BackendError::Unavailable(msg) => WorkerError::RedisError(msg),
+            BackendError::Conflict(msg) => WorkerError::QueueError(msg),
+            BackendError::NotFound(msg) => WorkerError::QueueError(msg),
+            BackendError::Internal(msg) => WorkerError::QueueError(msg),
+            BackendError::Serialization(msg) => WorkerError::QueueError(msg),
+            BackendError::Configuration(msg) => WorkerError::ConfigError(msg),
+            BackendError::Timeout(msg) => WorkerError::ExecutionError(msg),
+            BackendError::DuplicateActivity(msg) => WorkerError::DuplicateActivity(msg),
+            BackendError::IdempotencyConflict(msg) => WorkerError::IdempotencyConflict(msg),
+        }
     }
 }
 

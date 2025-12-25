@@ -199,6 +199,7 @@
 //! ```
 
 pub mod activity;
+pub mod backend;
 pub mod config;
 pub mod observability;
 pub mod queue;
@@ -211,7 +212,6 @@ pub use crate::queue::queue::{
     ActivityEvent, ActivityEventType, ActivityQueue, ActivitySnapshot, QueueStats,
 };
 pub use crate::runner::error::WorkerError;
-pub use crate::runner::redis::RedisConfig;
 pub use crate::runner::runner::{
     ActivityBuilder, ActivityExecutor, MetricsSink, WorkerEngine, WorkerEngineBuilder,
 };
@@ -220,3 +220,8 @@ pub use activity::activity::{
     ActivityStatus, OnDuplicate,
 };
 pub use activity::error::{ActivityError, RetryableError};
+
+// Re-export backend types for custom backend implementations
+pub use crate::backend::{
+    redis::RedisConfig, Backend, BackendError, InspectionBackend, QueueBackend, RedisBackend,
+};

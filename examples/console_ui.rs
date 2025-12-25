@@ -1,5 +1,6 @@
 use axum::{serve, Router};
 use runner_q::{runnerq_ui, WorkerEngine};
+use std::{sync::Arc, time::Duration};
 use tower_http::cors::{Any, CorsLayer};
 
 /// Example showing how to serve the RunnerQ Console UI with real-time updates
@@ -23,6 +24,52 @@ async fn main() -> anyhow::Result<()> {
     // Get inspector from engine - event streaming is auto-enabled
     let inspector = engine.inspector();
 
+    // Clone executor for background task
+    let executor = engine.get_activity_executor();
+
+    // Start worker engine in background
+    let engine_clone = Arc::new(engine);
+    let engine_handle = {
+        let engine = engine_clone.clone();
+        tokio::spawn(async move {
+            println!("🚀 Worker engine starting...");
+            if let Err(e) = engine.start().await {
+                eprintln!("❌ Worker engine error: {}", e);
+            }
+        })
+    };
+
+    // Enqueue test activities periodically
+    tokio::spawn(async move {
+        println!("⏳ Waiting 3 seconds before first test activity...");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        let mut counter = 1;
+        loop {
+            println!("\n📤 Enqueueing test activity #{}", counter);
+            match executor
+                .activity("test_activity")
+                .payload(serde_json::json!({
+                    "test": true,
+                    "counter": counter,
+                    "timestamp": chrono::Utc::now().to_rfc3339()
+                }))
+                .idempotency_key(
+                    uuid::Uuid::new_v4().to_string(),
+                    runner_q::OnDuplicate::ReturnExisting,
+                )
+                .execute()
+                .await
+            {
+                Ok(_) => println!("✓ Activity #{} enqueued successfully", counter),
+                Err(e) => eprintln!("✗ Failed to enqueue activity: {}", e),
+            }
+
+            counter += 1;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+
     let app = Router::new().nest("/console", runnerq_ui(inspector)).layer(
         CorsLayer::new()
             .allow_origin(Any)
@@ -38,5 +85,7 @@ async fn main() -> anyhow::Result<()> {
     println!("   Press Ctrl+C to stop");
 
     serve(listener, app).await?;
+    // Cleanup
+    engine_handle.abort();
     Ok(())
 }

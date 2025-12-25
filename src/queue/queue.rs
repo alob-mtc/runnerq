@@ -1197,7 +1197,8 @@ impl ActivityQueueTrait for ActivityQueue {
 
             // Add exponential backoff delay, capped at 1 hour
             let backoff_multiplier = 2_u64.saturating_pow(retry_activity.retry_count);
-            let delay_seconds = retry_activity.retry_delay_seconds
+            let delay_seconds = retry_activity
+                .retry_delay_seconds
                 .saturating_mul(backoff_multiplier)
                 .min(Self::MAX_RETRY_DELAY_SECONDS);
             let scheduled_at = chrono::Utc::now() + chrono::Duration::seconds(delay_seconds as i64);
