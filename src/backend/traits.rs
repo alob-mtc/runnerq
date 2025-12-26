@@ -40,8 +40,12 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::error::BackendError;
-use crate::activity::activity::ActivityStatus;
 use crate::ActivityPriority;
+
+// Re-export observability types used in traits
+pub use crate::observability::{
+    ActivityEvent, ActivityEventType, ActivitySnapshot, DeadLetterRecord,
+};
 
 // ============================================================================
 // Domain Types - Backend-agnostic representations
@@ -160,68 +164,6 @@ pub struct PriorityBreakdown {
     pub low: u64,
 }
 
-/// A snapshot of an activity's current state.
-///
-/// This is a rich view of an activity used for observability and inspection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActivitySnapshot {
-    pub id: Uuid,
-    pub activity_type: String,
-    pub payload: Value,
-    pub priority: ActivityPriority,
-    pub status: ActivityStatus,
-    pub created_at: DateTime<Utc>,
-    pub scheduled_at: Option<DateTime<Utc>>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub current_worker_id: Option<String>,
-    pub last_worker_id: Option<String>,
-    pub retry_count: u32,
-    pub max_retries: u32,
-    pub timeout_seconds: u64,
-    pub retry_delay_seconds: u64,
-    pub metadata: HashMap<String, String>,
-    pub last_error: Option<String>,
-    pub last_error_at: Option<DateTime<Utc>>,
-    pub status_updated_at: DateTime<Utc>,
-    pub idempotency_key: Option<String>,
-}
-
-/// An event in an activity's lifecycle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActivityEvent {
-    pub activity_id: Uuid,
-    pub timestamp: DateTime<Utc>,
-    pub event_type: ActivityEventType,
-    pub worker_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<Value>,
-}
-
-/// Types of lifecycle events.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ActivityEventType {
-    Enqueued,
-    Scheduled,
-    Dequeued,
-    Started,
-    Completed,
-    Failed,
-    Retrying,
-    DeadLetter,
-    Requeued,
-    LeaseExtended,
-    ResultStored,
-}
-
-/// A record from the dead letter queue.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeadLetterRecord {
-    pub activity: ActivitySnapshot,
-    pub error: String,
-    pub failed_at: DateTime<Utc>,
-}
-
 // ============================================================================
 // QueueBackend Trait - Core queue operations
 // ============================================================================
@@ -265,7 +207,7 @@ pub trait QueueBackend: Send + Sync {
         activity_id: Uuid,
         lease_id: &str,
         result: Option<Value>,
-        worker_id: Option<&str>,
+        worker_id: &str,
     ) -> Result<(), BackendError>;
 
     /// Mark a dequeued activity as failed.
@@ -281,7 +223,7 @@ pub trait QueueBackend: Send + Sync {
         activity_id: Uuid,
         lease_id: &str,
         failure: FailureKind,
-        worker_id: Option<&str>,
+        worker_id: &str,
     ) -> Result<bool, BackendError>;
 
     /// Process scheduled activities that are ready to run.

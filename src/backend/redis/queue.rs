@@ -153,6 +153,9 @@ impl InternalSnapshot {
             last_error: self.last_error.clone(),
             last_error_at: self.last_error_at,
             status_updated_at: self.status_updated_at,
+            score: self.score,
+            lease_deadline_ms: self.lease_deadline_ms,
+            processing_member: self.processing_member.clone(),
             idempotency_key: self.idempotency_key.clone(),
         }
     }
@@ -559,7 +562,7 @@ pub async fn ack_success(
     activity_id: Uuid,
     _lease_id: &str,
     result: Option<Value>,
-    worker_id: Option<&str>,
+    worker_id: &str,
 ) -> Result<(), BackendError> {
     let mut conn = get_conn(backend).await?;
 
@@ -573,9 +576,7 @@ pub async fn ack_success(
     snapshot.status = ActivityStatus::Completed;
     snapshot.status_updated_at = completed_at;
     snapshot.completed_at = Some(completed_at);
-    if let Some(w) = worker_id {
-        snapshot.last_worker_id = Some(w.to_string());
-    }
+    snapshot.last_worker_id = Some(worker_id.to_string());
     snapshot.current_worker_id = None;
     snapshot.processing_member = None;
     snapshot.lease_deadline_ms = None;
@@ -589,7 +590,7 @@ pub async fn ack_success(
         backend,
         &activity_id,
         ActivityEventType::Completed,
-        worker_id,
+        Some(worker_id),
         Some(json!({ "activity_type": snapshot.activity_type })),
     )
     .await?;
@@ -612,7 +613,7 @@ pub async fn ack_failure(
     activity_id: Uuid,
     _lease_id: &str,
     failure: FailureKind,
-    worker_id: Option<&str>,
+    worker_id: &str,
 ) -> Result<bool, BackendError> {
     let mut conn = get_conn(backend).await?;
 
@@ -621,9 +622,9 @@ pub async fn ack_failure(
         .ok_or_else(|| BackendError::NotFound(format!("Activity {} not found", activity_id)))?;
 
     let now_ts = now();
-    if let Some(w) = worker_id {
-        snapshot.last_worker_id = Some(w.to_string());
-    }
+
+    snapshot.last_worker_id = Some(worker_id.to_string());
+
     snapshot.current_worker_id = None;
     snapshot.processing_member = None;
     snapshot.lease_deadline_ms = None;
@@ -649,7 +650,7 @@ pub async fn ack_failure(
             backend,
             &activity_id,
             ActivityEventType::Failed,
-            worker_id,
+            Some(worker_id),
             Some(json!({ "retryable": false, "error": error_message })),
         )
         .await?;
@@ -679,7 +680,7 @@ pub async fn ack_failure(
             backend,
             &activity_id,
             ActivityEventType::Retrying,
-            worker_id,
+            Some(worker_id),
             Some(json!({
                 "retry_count": snapshot.retry_count,
                 "scheduled_at": scheduled_at,
@@ -752,7 +753,7 @@ pub async fn ack_failure(
         backend,
         &activity_id,
         ActivityEventType::DeadLetter,
-        worker_id,
+        Some(worker_id),
         Some(json!({ "error": error_message })),
     )
     .await?;

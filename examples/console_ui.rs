@@ -1,7 +1,29 @@
+use async_trait::async_trait;
 use axum::{serve, Router};
-use runner_q::{runnerq_ui, WorkerEngine};
+use runner_q::{runnerq_ui, ActivityContext, ActivityHandler, ActivityHandlerResult, WorkerEngine};
 use std::{sync::Arc, time::Duration};
 use tower_http::cors::{Any, CorsLayer};
+
+/// Test activity that simulates work
+struct TestActivity;
+
+#[async_trait]
+impl ActivityHandler for TestActivity {
+    fn activity_type(&self) -> String {
+        "test_activity".to_string()
+    }
+
+    async fn handle(
+        &self,
+        payload: serde_json::Value,
+        _ctx: ActivityContext,
+    ) -> ActivityHandlerResult {
+        println!("🔄 Processing test activity: {:?}", payload);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        println!("✅ Completed test activity");
+        Ok(Some(serde_json::json!({"status": "completed"})))
+    }
+}
 
 /// Example showing how to serve the RunnerQ Console UI with real-time updates
 ///
@@ -14,12 +36,15 @@ async fn main() -> anyhow::Result<()> {
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
-    let engine = WorkerEngine::builder()
+    let mut engine = WorkerEngine::builder()
         .redis_url(&redis_url)
         .queue_name("my_app")
         .max_workers(3)
         .build()
         .await?;
+
+    // Register test activity handler
+    engine.register_activity("test_activity".to_string(), Arc::new(TestActivity));
 
     // Get inspector from engine - event streaming is auto-enabled
     let inspector = engine.inspector();

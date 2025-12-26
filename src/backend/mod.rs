@@ -47,12 +47,15 @@ mod error;
 pub mod redis;
 mod traits;
 
-// Re-export core types
+// Re-export error type
 pub use error::BackendError;
+
+// Re-export trait types (includes re-exports from observability)
 pub use traits::{
-    // Domain types
+    // Observability types (re-exported from observability module)
     ActivityEvent,
     ActivityEventType,
+    // Backend domain types
     ActivityResult,
     ActivitySnapshot,
     // Traits

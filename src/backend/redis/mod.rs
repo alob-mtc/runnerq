@@ -235,7 +235,7 @@ impl QueueBackend for RedisBackend {
         activity_id: Uuid,
         lease_id: &str,
         result: Option<serde_json::Value>,
-        worker_id: Option<&str>,
+        worker_id: &str,
     ) -> Result<(), BackendError> {
         queue::ack_success(self, activity_id, lease_id, result, worker_id).await
     }
@@ -245,7 +245,7 @@ impl QueueBackend for RedisBackend {
         activity_id: Uuid,
         lease_id: &str,
         failure: FailureKind,
-        worker_id: Option<&str>,
+        worker_id: &str,
     ) -> Result<bool, BackendError> {
         queue::ack_failure(self, activity_id, lease_id, failure, worker_id).await
     }

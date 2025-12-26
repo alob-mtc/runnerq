@@ -89,6 +89,9 @@ fn queued_to_snapshot(activity: &QueuedActivity) -> ActivitySnapshot {
         last_error: None,
         last_error_at: None,
         status_updated_at: chrono::Utc::now(),
+        score: None,
+        lease_deadline_ms: None,
+        processing_member: None,
         idempotency_key: activity.idempotency_key.as_ref().map(|(k, _)| k.clone()),
     }
 }

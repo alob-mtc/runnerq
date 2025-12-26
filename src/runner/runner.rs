@@ -6,7 +6,7 @@ use crate::backend::redis::RedisConfig;
 use crate::backend::{Backend, FailureKind, IdempotencyBehavior, QueuedActivity};
 use crate::config::WorkerConfig;
 use crate::observability::QueueInspector;
-use crate::queue::queue::{ActivityQueue, ActivityQueueTrait, ActivityResult, ResultState};
+use crate::queue::queue::{ActivityQueueTrait, ActivityResult, ResultState};
 use crate::runner::error::WorkerError;
 use crate::{ActivityContext, ActivityError, RedisBackend};
 use bb8_redis::bb8::Pool;
@@ -128,8 +128,7 @@ impl Backoff {
 
 pub struct WorkerEngine {
     activity_queue: Arc<dyn ActivityQueueTrait>,
-    queue_core: Option<Arc<ActivityQueue>>,
-    backend: Option<Arc<dyn Backend>>,
+    backend: Arc<dyn Backend>,
     activity_handlers: ActivityHandlerRegistry, // kept as-is per request
     config: WorkerConfig,
     running: Arc<RwLock<bool>>, // retains external visibility
@@ -203,16 +202,14 @@ impl WorkerEngine {
     /// ```
     pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-        let queue = Arc::new(ActivityQueue::new(
-            redis_pool,
-            config.queue_name.clone(),
-            config.lease_ms.unwrap_or(100),
-        ));
-        let activity_queue: Arc<dyn ActivityQueueTrait> = queue.clone();
+        let backend: Arc<dyn Backend> = Arc::new(
+            RedisBackend::new(redis_pool, config.queue_name.clone())
+                .with_lease_ms(config.lease_ms.unwrap_or(60_000)),
+        );
+        let adapter = Arc::new(BackendQueueAdapter::new(backend.clone()));
         Self {
-            activity_queue,
-            queue_core: Some(queue),
-            backend: None,
+            activity_queue: adapter,
+            backend,
             activity_handlers: ActivityHandlerRegistry::new(),
             config,
             running: Arc::new(RwLock::new(false)),
@@ -235,8 +232,7 @@ impl WorkerEngine {
         let adapter = Arc::new(BackendQueueAdapter::new(backend.clone()));
         Self {
             activity_queue: adapter,
-            queue_core: None,
-            backend: Some(backend),
+            backend,
             activity_handlers: ActivityHandlerRegistry::new(),
             config,
             running: Arc::new(RwLock::new(false)),
@@ -252,19 +248,11 @@ impl WorkerEngine {
 
     /// Returns a `QueueInspector` for observability operations.
     ///
-    /// When using a custom backend, this returns an inspector that uses
-    /// the backend's inspection capabilities.
+    /// The inspector uses the backend's inspection capabilities for
+    /// reading queue state and activity information.
     pub fn inspector(&self) -> QueueInspector {
-        if let Some(ref queue_core) = self.queue_core {
-            QueueInspector::new(queue_core.redis_pool(), queue_core.queue_name().to_string())
-                .with_max_workers(self.config.max_concurrent_activities)
-        } else if let Some(ref backend) = self.backend {
-            QueueInspector::from_backend(backend.clone())
-                .with_max_workers(self.config.max_concurrent_activities)
-        } else {
-            // This should never happen, but provide a fallback
-            panic!("WorkerEngine has neither queue_core nor backend");
-        }
+        QueueInspector::from_backend(self.backend.clone())
+            .with_max_workers(self.config.max_concurrent_activities)
     }
 
     /// Creates a new WorkerEngineBuilder for fluent configuration.
@@ -545,7 +533,7 @@ impl WorkerEngine {
                 };
 
                 // Dequeue with cooperative shutdown
-                let dequeue_fut = activity_queue.dequeue(Duration::from_secs(1));
+                let dequeue_fut = activity_queue.dequeue(Duration::from_secs(1), &worker_label);
                 let activity_opt = tokio::select! {
                     _ = shutdown_rx.changed() => { drop(permit); break; }
                     res = dequeue_fut => res
@@ -601,7 +589,7 @@ impl WorkerEngine {
                                 activity,
                                 "handler_not_found".to_string(),
                                 false,
-                                Some(worker_label.as_str()),
+                                worker_label.as_str(),
                             )
                             .await
                         {
@@ -655,7 +643,7 @@ impl WorkerEngine {
                     Ok(Ok(value)) => {
                         metrics.inc_counter("activity_completed", 1);
                         if let Err(e) = activity_queue
-                            .mark_completed(&activity, Some(worker_label.as_str()))
+                            .mark_completed(&activity, worker_label.as_str())
                             .await
                         {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as completed");
@@ -678,12 +666,7 @@ impl WorkerEngine {
                         metrics.inc_counter("activity_retry", 1);
                         warn!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity requesting retry");
                         match activity_queue
-                            .mark_failed(
-                                activity,
-                                reason.clone(),
-                                true,
-                                Some(worker_label.as_str()),
-                            )
+                            .mark_failed(activity, reason.clone(), true, worker_label.as_str())
                             .await
                         {
                             Ok(true) => {
@@ -718,12 +701,7 @@ impl WorkerEngine {
                         metrics.inc_counter("activity_failed_non_retry", 1);
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity failed");
                         if let Err(e) = activity_queue
-                            .mark_failed(
-                                activity,
-                                reason.clone(),
-                                false,
-                                Some(worker_label.as_str()),
-                            )
+                            .mark_failed(activity, reason.clone(), false, worker_label.as_str())
                             .await
                         {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
@@ -748,12 +726,7 @@ impl WorkerEngine {
                         let error_msg = "Activity execution timed out".to_string();
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, timeout = ?activity_timeout, "Activity timed out");
                         match activity_queue
-                            .mark_failed(
-                                activity,
-                                error_msg.clone(),
-                                true,
-                                Some(worker_label.as_str()),
-                            )
+                            .mark_failed(activity, error_msg.clone(), true, worker_label.as_str())
                             .await
                         {
                             Ok(true) => {
@@ -1666,9 +1639,12 @@ impl ActivityQueueTrait for BackendQueueAdapter {
         self.backend.enqueue(queued).await.map_err(Into::into)
     }
 
-    async fn dequeue(&self, timeout: Duration) -> Result<Option<Activity>, WorkerError> {
-        let worker_id = format!("worker-{}", uuid::Uuid::new_v4());
-        match self.backend.dequeue(&worker_id, timeout).await? {
+    async fn dequeue(
+        &self,
+        timeout: Duration,
+        worker_id: &str,
+    ) -> Result<Option<Activity>, WorkerError> {
+        match self.backend.dequeue(worker_id, timeout).await? {
             Some(dequeued) => {
                 let mut activity = Self::queued_to_activity(&dequeued.activity);
                 activity.status = crate::ActivityStatus::Running;
@@ -1691,7 +1667,7 @@ impl ActivityQueueTrait for BackendQueueAdapter {
     async fn mark_completed(
         &self,
         activity: &Activity,
-        worker_id: Option<&str>,
+        worker_id: &str,
     ) -> Result<(), WorkerError> {
         self.backend
             .ack_success(activity.id, "", None, worker_id)
@@ -1704,7 +1680,7 @@ impl ActivityQueueTrait for BackendQueueAdapter {
         activity: Activity,
         error_message: String,
         retryable: bool,
-        worker_id: Option<&str>,
+        worker_id: &str,
     ) -> Result<bool, WorkerError> {
         let failure = if retryable {
             FailureKind::Retryable {

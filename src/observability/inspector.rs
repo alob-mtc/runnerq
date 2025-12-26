@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::activity::activity::{Activity, ActivityStatus};
 use crate::backend::Backend;
-use crate::queue::queue::{ActivityEvent, ActivitySnapshot, QueueStats};
+use crate::observability::models::{ActivityEvent, ActivitySnapshot, DeadLetterRecord, QueueStats};
 use crate::runner::error::WorkerError;
 
 /// Queue inspector for observability operations.
@@ -713,49 +713,11 @@ impl QueueInspector {
         }
     }
 
-    /// Convert a backend ActivityEvent to a queue ActivityEvent
+    /// Convert a backend ActivityEvent to a queue ActivityEvent.
+    /// Since both backend and observability use the same types, this is now a simple passthrough.
     fn convert_backend_event(event: crate::backend::ActivityEvent) -> ActivityEvent {
-        ActivityEvent {
-            activity_id: event.activity_id,
-            timestamp: event.timestamp,
-            event_type: match event.event_type {
-                crate::backend::ActivityEventType::Enqueued => {
-                    crate::queue::queue::ActivityEventType::Enqueued
-                }
-                crate::backend::ActivityEventType::Scheduled => {
-                    crate::queue::queue::ActivityEventType::Scheduled
-                }
-                crate::backend::ActivityEventType::Dequeued => {
-                    crate::queue::queue::ActivityEventType::Dequeued
-                }
-                crate::backend::ActivityEventType::Started => {
-                    crate::queue::queue::ActivityEventType::Started
-                }
-                crate::backend::ActivityEventType::Completed => {
-                    crate::queue::queue::ActivityEventType::Completed
-                }
-                crate::backend::ActivityEventType::Failed => {
-                    crate::queue::queue::ActivityEventType::Failed
-                }
-                crate::backend::ActivityEventType::Retrying => {
-                    crate::queue::queue::ActivityEventType::Retrying
-                }
-                crate::backend::ActivityEventType::DeadLetter => {
-                    crate::queue::queue::ActivityEventType::DeadLetter
-                }
-                crate::backend::ActivityEventType::Requeued => {
-                    crate::queue::queue::ActivityEventType::Requeued
-                }
-                crate::backend::ActivityEventType::LeaseExtended => {
-                    crate::queue::queue::ActivityEventType::LeaseExtended
-                }
-                crate::backend::ActivityEventType::ResultStored => {
-                    crate::queue::queue::ActivityEventType::ResultStored
-                }
-            },
-            worker_id: event.worker_id,
-            detail: event.detail,
-        }
+        // The backend re-exports ActivityEvent from observability, so types are identical
+        event
     }
 }
 
@@ -764,11 +726,4 @@ struct DeadLetterEnvelope {
     activity: Activity,
     error: String,
     failed_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeadLetterRecord {
-    pub activity: ActivitySnapshot,
-    pub error: String,
-    pub failed_at: DateTime<Utc>,
 }
