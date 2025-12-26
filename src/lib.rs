@@ -199,11 +199,11 @@
 //! ```
 
 pub mod activity;
-pub mod backend;
 pub mod config;
 pub mod observability;
 pub mod queue;
 pub mod runner;
+pub mod storage;
 
 // Re-export main types for easy access
 pub use crate::config::WorkerConfig;
@@ -222,6 +222,6 @@ pub use activity::activity::{
 pub use activity::error::{ActivityError, RetryableError};
 
 // Re-export backend types for custom backend implementations
-pub use crate::backend::{
-    redis::RedisConfig, Backend, BackendError, InspectionBackend, QueueBackend, RedisBackend,
+pub use crate::storage::{
+    redis::RedisConfig, InspectionStorage, QueueStorage, RedisBackend, Storage, StorageError,
 };

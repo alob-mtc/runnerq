@@ -14,17 +14,17 @@ use uuid::Uuid;
 use super::queue::{load_snapshot, snapshot_to_public};
 use super::RedisBackend;
 use crate::activity::activity::ActivityStatus;
-use crate::backend::error::BackendError;
-use crate::backend::traits::*;
+use crate::storage::error::StorageError;
+use crate::storage::traits::*;
 
 async fn get_conn(
     backend: &RedisBackend,
-) -> Result<PooledConnection<'_, RedisConnectionManager>, BackendError> {
+) -> Result<PooledConnection<'_, RedisConnectionManager>, StorageError> {
     backend
         .pool()
         .get()
         .await
-        .map_err(|e| BackendError::Unavailable(format!("Failed to get Redis connection: {}", e)))
+        .map_err(|e| StorageError::Unavailable(format!("Failed to get Redis connection: {}", e)))
 }
 
 fn slice_to_range(offset: usize, limit: usize) -> std::ops::RangeInclusive<isize> {
@@ -40,7 +40,7 @@ fn slice_to_range(offset: usize, limit: usize) -> std::ops::RangeInclusive<isize
 async fn collect_snapshots(
     conn: &mut PooledConnection<'_, RedisConnectionManager>,
     members: &[String],
-) -> Result<Vec<ActivitySnapshot>, BackendError> {
+) -> Result<Vec<ActivitySnapshot>, StorageError> {
     let mut snapshots = Vec::with_capacity(members.len());
     for member in members {
         if let Some(activity_id) = member_to_uuid(member) {
@@ -107,7 +107,7 @@ struct DeadLetterEnvelope {
 // Inspection Operations
 // ============================================================================
 
-pub async fn stats(backend: &RedisBackend) -> Result<QueueStats, BackendError> {
+pub async fn stats(backend: &RedisBackend) -> Result<QueueStats, StorageError> {
     let mut conn = get_conn(backend).await?;
 
     let queue_key = backend.main_queue_key();
@@ -159,7 +159,7 @@ pub async fn list_pending(
     backend: &RedisBackend,
     offset: usize,
     limit: usize,
-) -> Result<Vec<ActivitySnapshot>, BackendError> {
+) -> Result<Vec<ActivitySnapshot>, StorageError> {
     let mut conn = get_conn(backend).await?;
     let range = slice_to_range(offset, limit);
     let members: Vec<String> = conn
@@ -172,7 +172,7 @@ pub async fn list_processing(
     backend: &RedisBackend,
     offset: usize,
     limit: usize,
-) -> Result<Vec<ActivitySnapshot>, BackendError> {
+) -> Result<Vec<ActivitySnapshot>, StorageError> {
     let mut conn = get_conn(backend).await?;
     let range = slice_to_range(offset, limit);
     let members: Vec<String> = conn
@@ -185,7 +185,7 @@ pub async fn list_scheduled(
     backend: &RedisBackend,
     offset: usize,
     limit: usize,
-) -> Result<Vec<ActivitySnapshot>, BackendError> {
+) -> Result<Vec<ActivitySnapshot>, StorageError> {
     let mut conn = get_conn(backend).await?;
     let range = slice_to_range(offset, limit);
     let activity_jsons: Vec<String> = conn
@@ -215,7 +215,7 @@ pub async fn list_completed(
     backend: &RedisBackend,
     offset: usize,
     limit: usize,
-) -> Result<Vec<ActivitySnapshot>, BackendError> {
+) -> Result<Vec<ActivitySnapshot>, StorageError> {
     let mut conn = get_conn(backend).await?;
     let completed_key = backend.completed_key();
     let range = slice_to_range(offset, limit);
@@ -239,7 +239,7 @@ pub async fn list_dead_letter(
     backend: &RedisBackend,
     offset: usize,
     limit: usize,
-) -> Result<Vec<DeadLetterRecord>, BackendError> {
+) -> Result<Vec<DeadLetterRecord>, StorageError> {
     let mut conn = get_conn(backend).await?;
     let range = slice_to_range(offset, limit);
     let dead_letter_key = backend.dead_letter_key();
@@ -280,7 +280,7 @@ pub async fn list_dead_letter(
 pub async fn get_activity(
     backend: &RedisBackend,
     activity_id: Uuid,
-) -> Result<Option<ActivitySnapshot>, BackendError> {
+) -> Result<Option<ActivitySnapshot>, StorageError> {
     let mut conn = get_conn(backend).await?;
     match load_snapshot(&mut conn, &activity_id).await? {
         Some(s) => Ok(Some(snapshot_to_public(&s))),
@@ -292,7 +292,7 @@ pub async fn get_activity_events(
     backend: &RedisBackend,
     activity_id: Uuid,
     limit: usize,
-) -> Result<Vec<ActivityEvent>, BackendError> {
+) -> Result<Vec<ActivityEvent>, StorageError> {
     let mut conn = get_conn(backend).await?;
     let events_key = RedisBackend::activity_events_key(&activity_id);
     let start = -(limit as isize);
@@ -313,7 +313,7 @@ pub async fn get_activity_events(
 
 pub fn event_stream(
     backend: &RedisBackend,
-) -> BoxStream<'static, Result<ActivityEvent, BackendError>> {
+) -> BoxStream<'static, Result<ActivityEvent, StorageError>> {
     let redis_pool = backend.pool().clone();
     let stream_key = backend.events_stream_key();
     let queue_name = backend.queue_name().to_string();
@@ -333,7 +333,7 @@ pub fn event_stream(
                     );
                     tokio::time::sleep(Duration::from_millis(1000)).await;
                     return Some((
-                        Err(BackendError::Unavailable(format!(
+                        Err(StorageError::Unavailable(format!(
                             "Redis connection error: {}",
                             e
                         ))),
@@ -400,14 +400,14 @@ pub fn event_stream(
                         }
                     }
                     Some((
-                        Err(BackendError::Internal("No events".to_string())),
+                        Err(StorageError::Internal("No events".to_string())),
                         (pool.clone(), key.clone(), qn.clone(), last_id),
                     ))
                 }
                 Err(e) if e.kind() == redis::ErrorKind::IoError => {
                     tokio::time::sleep(Duration::from_millis(1000)).await;
                     Some((
-                        Err(BackendError::Unavailable("Redis IO error".to_string())),
+                        Err(StorageError::Unavailable("Redis IO error".to_string())),
                         (pool.clone(), key.clone(), qn.clone(), last_id),
                     ))
                 }
@@ -419,7 +419,7 @@ pub fn event_stream(
                     );
                     tokio::time::sleep(Duration::from_millis(1000)).await;
                     Some((
-                        Err(BackendError::Unavailable(format!(
+                        Err(StorageError::Unavailable(format!(
                             "Redis stream error: {}",
                             e
                         ))),

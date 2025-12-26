@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use super::RedisBackend;
 use crate::activity::activity::ActivityStatus;
-use crate::backend::error::BackendError;
-use crate::backend::traits::*;
+use crate::storage::error::StorageError;
+use crate::storage::traits::*;
 use crate::ActivityPriority;
 
 // Constants
@@ -35,12 +35,12 @@ fn now() -> DateTime<Utc> {
 
 async fn get_conn(
     backend: &RedisBackend,
-) -> Result<PooledConnection<'_, RedisConnectionManager>, BackendError> {
+) -> Result<PooledConnection<'_, RedisConnectionManager>, StorageError> {
     backend
         .pool()
         .get()
         .await
-        .map_err(|e| BackendError::Unavailable(format!("Failed to get Redis connection: {}", e)))
+        .map_err(|e| StorageError::Unavailable(format!("Failed to get Redis connection: {}", e)))
 }
 
 fn calculate_priority_score(priority: &ActivityPriority, created_at: DateTime<Utc>) -> f64 {
@@ -62,13 +62,13 @@ fn create_queue_entry(activity: &QueuedActivity) -> String {
     )
 }
 
-fn parse_queue_entry(entry: &str) -> Result<QueuedActivity, BackendError> {
+fn parse_queue_entry(entry: &str) -> Result<QueuedActivity, StorageError> {
     if let Some(colon_pos) = entry.find(':') {
         let json = &entry[colon_pos + 1..];
         serde_json::from_str(json)
-            .map_err(|e| BackendError::Internal(format!("Failed to parse queue entry: {}", e)))
+            .map_err(|e| StorageError::Internal(format!("Failed to parse queue entry: {}", e)))
     } else {
-        Err(BackendError::Internal("Invalid queue entry format".into()))
+        Err(StorageError::Internal("Invalid queue entry format".into()))
     }
 }
 
@@ -165,7 +165,7 @@ async fn write_snapshot(
     conn: &mut PooledConnection<'_, RedisConnectionManager>,
     backend: &RedisBackend,
     snapshot: &InternalSnapshot,
-) -> Result<(), BackendError> {
+) -> Result<(), StorageError> {
     let activity_key = RedisBackend::activity_key(&snapshot.id);
     let mut fields: Vec<(String, String)> = Vec::new();
 
@@ -271,13 +271,13 @@ async fn write_snapshot(
 pub(super) async fn load_snapshot(
     conn: &mut PooledConnection<'_, RedisConnectionManager>,
     activity_id: &Uuid,
-) -> Result<Option<InternalSnapshot>, BackendError> {
+) -> Result<Option<InternalSnapshot>, StorageError> {
     let activity_key = RedisBackend::activity_key(activity_id);
     let snapshot_json: Option<String> = conn.hget(&activity_key, "snapshot").await?;
     match snapshot_json {
         Some(json) => {
             let snapshot: InternalSnapshot = serde_json::from_str(&json).map_err(|e| {
-                BackendError::Internal(format!("Failed to deserialize snapshot: {}", e))
+                StorageError::Internal(format!("Failed to deserialize snapshot: {}", e))
             })?;
             Ok(Some(snapshot))
         }
@@ -292,7 +292,7 @@ async fn record_event(
     event_type: ActivityEventType,
     worker_id: Option<&str>,
     detail: Option<Value>,
-) -> Result<(), BackendError> {
+) -> Result<(), StorageError> {
     let event = ActivityEvent {
         activity_id: *activity_id,
         timestamp: now(),
@@ -333,7 +333,7 @@ async fn add_to_completed_set(
     backend: &RedisBackend,
     activity_id: &Uuid,
     completed_at: DateTime<Utc>,
-) -> Result<(), BackendError> {
+) -> Result<(), StorageError> {
     let completed_key = backend.completed_key();
     let score = completed_at.timestamp();
     let member = activity_id.to_string();
@@ -352,7 +352,7 @@ async fn ack_processing(
     conn: &mut PooledConnection<'_, RedisConnectionManager>,
     backend: &RedisBackend,
     activity_id: &Uuid,
-) -> Result<(), BackendError> {
+) -> Result<(), StorageError> {
     let processing_key = backend.processing_queue_key();
     let activity_key = RedisBackend::activity_key(activity_id);
 
@@ -375,7 +375,7 @@ async fn ack_processing(
 // Queue Operations
 // ============================================================================
 
-pub async fn enqueue(backend: &RedisBackend, activity: QueuedActivity) -> Result<(), BackendError> {
+pub async fn enqueue(backend: &RedisBackend, activity: QueuedActivity) -> Result<(), StorageError> {
     let mut conn = get_conn(backend).await?;
 
     // Handle scheduled activities
@@ -444,7 +444,7 @@ pub async fn dequeue(
     backend: &RedisBackend,
     worker_id: &str,
     timeout: Duration,
-) -> Result<Option<DequeuedActivity>, BackendError> {
+) -> Result<Option<DequeuedActivity>, StorageError> {
     let mut conn = get_conn(backend).await?;
 
     let queue_key = backend.main_queue_key();
@@ -563,14 +563,14 @@ pub async fn ack_success(
     _lease_id: &str,
     result: Option<Value>,
     worker_id: &str,
-) -> Result<(), BackendError> {
+) -> Result<(), StorageError> {
     let mut conn = get_conn(backend).await?;
 
     ack_processing(&mut conn, backend, &activity_id).await?;
 
     let mut snapshot = load_snapshot(&mut conn, &activity_id)
         .await?
-        .ok_or_else(|| BackendError::NotFound(format!("Activity {} not found", activity_id)))?;
+        .ok_or_else(|| StorageError::NotFound(format!("Activity {} not found", activity_id)))?;
 
     let completed_at = now();
     snapshot.status = ActivityStatus::Completed;
@@ -614,12 +614,12 @@ pub async fn ack_failure(
     _lease_id: &str,
     failure: FailureKind,
     worker_id: &str,
-) -> Result<bool, BackendError> {
+) -> Result<bool, StorageError> {
     let mut conn = get_conn(backend).await?;
 
     let mut snapshot = load_snapshot(&mut conn, &activity_id)
         .await?
-        .ok_or_else(|| BackendError::NotFound(format!("Activity {} not found", activity_id)))?;
+        .ok_or_else(|| StorageError::NotFound(format!("Activity {} not found", activity_id)))?;
 
     let now_ts = now();
 
@@ -762,7 +762,7 @@ pub async fn ack_failure(
     Ok(true)
 }
 
-pub async fn process_scheduled(backend: &RedisBackend) -> Result<u64, BackendError> {
+pub async fn process_scheduled(backend: &RedisBackend) -> Result<u64, StorageError> {
     let mut conn = get_conn(backend).await?;
 
     let now_ts = Utc::now().timestamp();
@@ -798,7 +798,7 @@ pub async fn process_scheduled(backend: &RedisBackend) -> Result<u64, BackendErr
 pub async fn requeue_expired(
     backend: &RedisBackend,
     batch_size: usize,
-) -> Result<u64, BackendError> {
+) -> Result<u64, StorageError> {
     let mut conn = get_conn(backend).await?;
 
     let processing_key = backend.processing_queue_key();
@@ -872,7 +872,7 @@ pub async fn extend_lease(
     backend: &RedisBackend,
     activity_id: Uuid,
     extend_by: Duration,
-) -> Result<bool, BackendError> {
+) -> Result<bool, StorageError> {
     let mut conn = get_conn(backend).await?;
 
     let processing_key = backend.processing_queue_key();
@@ -940,7 +940,7 @@ pub async fn store_result(
     backend: &RedisBackend,
     activity_id: Uuid,
     result: ActivityResult,
-) -> Result<(), BackendError> {
+) -> Result<(), StorageError> {
     let mut conn = get_conn(backend).await?;
 
     let result_key = RedisBackend::result_key(&activity_id);
@@ -968,7 +968,7 @@ pub async fn store_result(
 pub async fn get_result(
     backend: &RedisBackend,
     activity_id: Uuid,
-) -> Result<Option<ActivityResult>, BackendError> {
+) -> Result<Option<ActivityResult>, StorageError> {
     let mut conn = get_conn(backend).await?;
 
     let result_key = RedisBackend::result_key(&activity_id);
@@ -986,7 +986,7 @@ pub async fn get_result(
 pub async fn check_idempotency(
     backend: &RedisBackend,
     activity: &QueuedActivity,
-) -> Result<Option<Uuid>, BackendError> {
+) -> Result<Option<Uuid>, StorageError> {
     let Some((ref key, ref behavior)) = activity.idempotency_key else {
         return Ok(None);
     };
@@ -1014,7 +1014,7 @@ pub async fn check_idempotency(
     let existing_id = existing_id_str
         .and_then(|s| Uuid::parse_str(&s).ok())
         .ok_or_else(|| {
-            BackendError::Internal("Idempotency key exists but activity_id not found".to_string())
+            StorageError::Internal("Idempotency key exists but activity_id not found".to_string())
         })?;
 
     // Load existing snapshot to check status
@@ -1049,7 +1049,7 @@ pub async fn check_idempotency(
             if existing_snapshot.status != ActivityStatus::Failed
                 && existing_snapshot.status != ActivityStatus::DeadLetter
             {
-                return Err(BackendError::IdempotencyConflict(format!(
+                return Err(StorageError::IdempotencyConflict(format!(
                     "Idempotency key '{}' exists with status '{:?}'",
                     key, existing_snapshot.status
                 )));
@@ -1076,13 +1076,13 @@ pub async fn check_idempotency(
             if claimed == 1 {
                 Ok(None)
             } else {
-                Err(BackendError::IdempotencyConflict(format!(
+                Err(StorageError::IdempotencyConflict(format!(
                     "Idempotency key '{}' was claimed by another request",
                     key
                 )))
             }
         }
-        IdempotencyBehavior::NoReuse => Err(BackendError::DuplicateActivity(format!(
+        IdempotencyBehavior::NoReuse => Err(StorageError::DuplicateActivity(format!(
             "Idempotency key '{}' already exists for activity {}",
             key, existing_id
         ))),

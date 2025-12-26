@@ -1,6 +1,6 @@
 //! Redis backend implementation for RunnerQ.
 //!
-//! This module provides a Redis-based implementation of the [`Backend`] trait,
+//! This module provides a Redis-based implementation of the [`Storage`] trait,
 //! which is the default backend for RunnerQ.
 //!
 //! # Features
@@ -15,7 +15,7 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use runner_q::backend::RedisBackend;
+//! use runner_q::storage::RedisBackend;
 //! use runner_q::WorkerEngine;
 //! use std::sync::Arc;
 //!
@@ -49,7 +49,7 @@ use bb8_redis::{bb8::Pool, RedisConnectionManager};
 pub use pool::RedisConfig;
 pub use pool::{create_redis_pool, create_redis_pool_with_config};
 
-use super::error::BackendError;
+use super::error::StorageError;
 use super::traits::*;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -57,8 +57,8 @@ use uuid::Uuid;
 
 /// Redis-based backend for RunnerQ.
 ///
-/// This struct provides a complete implementation of both [`QueueBackend`]
-/// and [`InspectionBackend`] using Redis as the storage layer.
+/// This struct provides a complete implementation of both [`QueueStorage`]
+/// and [`InspectionStorage`] using Redis as the storage layer.
 #[derive(Clone)]
 pub struct RedisBackend {
     pool: Pool<RedisConnectionManager>,
@@ -188,7 +188,7 @@ impl RedisBackendBuilder {
     }
 
     /// Build the Redis backend.
-    pub async fn build(self) -> Result<RedisBackend, BackendError> {
+    pub async fn build(self) -> Result<RedisBackend, StorageError> {
         let redis_url = self
             .redis_url
             .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
@@ -217,8 +217,8 @@ impl Default for RedisBackendBuilder {
 // ============================================================================
 
 #[async_trait]
-impl QueueBackend for RedisBackend {
-    async fn enqueue(&self, activity: QueuedActivity) -> Result<(), BackendError> {
+impl QueueStorage for RedisBackend {
+    async fn enqueue(&self, activity: QueuedActivity) -> Result<(), StorageError> {
         queue::enqueue(self, activity).await
     }
 
@@ -226,7 +226,7 @@ impl QueueBackend for RedisBackend {
         &self,
         worker_id: &str,
         timeout: Duration,
-    ) -> Result<Option<DequeuedActivity>, BackendError> {
+    ) -> Result<Option<DequeuedActivity>, StorageError> {
         queue::dequeue(self, worker_id, timeout).await
     }
 
@@ -236,7 +236,7 @@ impl QueueBackend for RedisBackend {
         lease_id: &str,
         result: Option<serde_json::Value>,
         worker_id: &str,
-    ) -> Result<(), BackendError> {
+    ) -> Result<(), StorageError> {
         queue::ack_success(self, activity_id, lease_id, result, worker_id).await
     }
 
@@ -246,15 +246,15 @@ impl QueueBackend for RedisBackend {
         lease_id: &str,
         failure: FailureKind,
         worker_id: &str,
-    ) -> Result<bool, BackendError> {
+    ) -> Result<bool, StorageError> {
         queue::ack_failure(self, activity_id, lease_id, failure, worker_id).await
     }
 
-    async fn process_scheduled(&self) -> Result<u64, BackendError> {
+    async fn process_scheduled(&self) -> Result<u64, StorageError> {
         queue::process_scheduled(self).await
     }
 
-    async fn requeue_expired(&self, batch_size: usize) -> Result<u64, BackendError> {
+    async fn requeue_expired(&self, batch_size: usize) -> Result<u64, StorageError> {
         queue::requeue_expired(self, batch_size).await
     }
 
@@ -262,7 +262,7 @@ impl QueueBackend for RedisBackend {
         &self,
         activity_id: Uuid,
         extend_by: Duration,
-    ) -> Result<bool, BackendError> {
+    ) -> Result<bool, StorageError> {
         queue::extend_lease(self, activity_id, extend_by).await
     }
 
@@ -270,18 +270,18 @@ impl QueueBackend for RedisBackend {
         &self,
         activity_id: Uuid,
         result: ActivityResult,
-    ) -> Result<(), BackendError> {
+    ) -> Result<(), StorageError> {
         queue::store_result(self, activity_id, result).await
     }
 
-    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, BackendError> {
+    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError> {
         queue::get_result(self, activity_id).await
     }
 
     async fn check_idempotency(
         &self,
         activity: &QueuedActivity,
-    ) -> Result<Option<Uuid>, BackendError> {
+    ) -> Result<Option<Uuid>, StorageError> {
         queue::check_idempotency(self, activity).await
     }
 }
@@ -291,8 +291,8 @@ impl QueueBackend for RedisBackend {
 // ============================================================================
 
 #[async_trait]
-impl InspectionBackend for RedisBackend {
-    async fn stats(&self) -> Result<QueueStats, BackendError> {
+impl InspectionStorage for RedisBackend {
+    async fn stats(&self) -> Result<QueueStats, StorageError> {
         inspection::stats(self).await
     }
 
@@ -300,7 +300,7 @@ impl InspectionBackend for RedisBackend {
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<ActivitySnapshot>, BackendError> {
+    ) -> Result<Vec<ActivitySnapshot>, StorageError> {
         inspection::list_pending(self, offset, limit).await
     }
 
@@ -308,7 +308,7 @@ impl InspectionBackend for RedisBackend {
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<ActivitySnapshot>, BackendError> {
+    ) -> Result<Vec<ActivitySnapshot>, StorageError> {
         inspection::list_processing(self, offset, limit).await
     }
 
@@ -316,7 +316,7 @@ impl InspectionBackend for RedisBackend {
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<ActivitySnapshot>, BackendError> {
+    ) -> Result<Vec<ActivitySnapshot>, StorageError> {
         inspection::list_scheduled(self, offset, limit).await
     }
 
@@ -324,7 +324,7 @@ impl InspectionBackend for RedisBackend {
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<ActivitySnapshot>, BackendError> {
+    ) -> Result<Vec<ActivitySnapshot>, StorageError> {
         inspection::list_completed(self, offset, limit).await
     }
 
@@ -332,14 +332,14 @@ impl InspectionBackend for RedisBackend {
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<DeadLetterRecord>, BackendError> {
+    ) -> Result<Vec<DeadLetterRecord>, StorageError> {
         inspection::list_dead_letter(self, offset, limit).await
     }
 
     async fn get_activity(
         &self,
         activity_id: Uuid,
-    ) -> Result<Option<ActivitySnapshot>, BackendError> {
+    ) -> Result<Option<ActivitySnapshot>, StorageError> {
         inspection::get_activity(self, activity_id).await
     }
 
@@ -347,11 +347,11 @@ impl InspectionBackend for RedisBackend {
         &self,
         activity_id: Uuid,
         limit: usize,
-    ) -> Result<Vec<ActivityEvent>, BackendError> {
+    ) -> Result<Vec<ActivityEvent>, StorageError> {
         inspection::get_activity_events(self, activity_id, limit).await
     }
 
-    fn event_stream(&self) -> BoxStream<'static, Result<ActivityEvent, BackendError>> {
+    fn event_stream(&self) -> BoxStream<'static, Result<ActivityEvent, StorageError>> {
         inspection::event_stream(self)
     }
 }

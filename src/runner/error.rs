@@ -1,4 +1,4 @@
-use crate::backend::BackendError;
+use crate::storage::StorageError;
 use redis::RedisError;
 use thiserror::Error;
 
@@ -56,18 +56,18 @@ impl From<RedisError> for WorkerError {
     }
 }
 
-impl From<BackendError> for WorkerError {
-    fn from(err: BackendError) -> Self {
+impl From<StorageError> for WorkerError {
+    fn from(err: StorageError) -> Self {
         match err {
-            BackendError::Unavailable(msg) => WorkerError::RedisError(msg),
-            BackendError::Conflict(msg) => WorkerError::QueueError(msg),
-            BackendError::NotFound(msg) => WorkerError::QueueError(msg),
-            BackendError::Internal(msg) => WorkerError::QueueError(msg),
-            BackendError::Serialization(msg) => WorkerError::QueueError(msg),
-            BackendError::Configuration(msg) => WorkerError::ConfigError(msg),
-            BackendError::Timeout(msg) => WorkerError::ExecutionError(msg),
-            BackendError::DuplicateActivity(msg) => WorkerError::DuplicateActivity(msg),
-            BackendError::IdempotencyConflict(msg) => WorkerError::IdempotencyConflict(msg),
+            StorageError::Unavailable(msg) => WorkerError::RedisError(msg),
+            StorageError::Conflict(msg) => WorkerError::QueueError(msg),
+            StorageError::NotFound(msg) => WorkerError::QueueError(msg),
+            StorageError::Internal(msg) => WorkerError::QueueError(msg),
+            StorageError::Serialization(msg) => WorkerError::QueueError(msg),
+            StorageError::Configuration(msg) => WorkerError::ConfigError(msg),
+            StorageError::Timeout(msg) => WorkerError::ExecutionError(msg),
+            StorageError::DuplicateActivity(msg) => WorkerError::DuplicateActivity(msg),
+            StorageError::IdempotencyConflict(msg) => WorkerError::IdempotencyConflict(msg),
         }
     }
 }

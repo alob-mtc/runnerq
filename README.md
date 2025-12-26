@@ -721,8 +721,8 @@ let engine = WorkerEngine::builder()
 You can implement your own backend by implementing the `Backend` trait (which combines `QueueBackend` and `InspectionBackend`):
 
 ```rust
-use runner_q::backend::{
-    Backend, QueueBackend, InspectionBackend, BackendError,
+use runner_q::storage::{
+    Backend, QueueBackend, InspectionBackend, StorageError,
     QueuedActivity, DequeuedActivity, FailureKind, ActivityResult,
     QueueStats, ActivitySnapshot, ActivityEvent, DeadLetterRecord,
 };
@@ -736,7 +736,7 @@ pub struct MyCustomBackend {
 
 #[async_trait]
 impl QueueBackend for MyCustomBackend {
-    async fn enqueue(&self, activity: QueuedActivity) -> Result<(), BackendError> {
+    async fn enqueue(&self, activity: QueuedActivity) -> Result<(), StorageError> {
         // Implement activity enqueuing
         todo!()
     }
@@ -745,7 +745,7 @@ impl QueueBackend for MyCustomBackend {
         &self,
         worker_id: &str,
         timeout: Duration,
-    ) -> Result<Option<DequeuedActivity>, BackendError> {
+    ) -> Result<Option<DequeuedActivity>, StorageError> {
         // Implement activity claiming
         todo!()
     }
@@ -756,7 +756,7 @@ impl QueueBackend for MyCustomBackend {
         lease_id: &str,
         result: Option<serde_json::Value>,
         worker_id: Option<&str>,
-    ) -> Result<(), BackendError> {
+    ) -> Result<(), StorageError> {
         // Mark activity as completed
         todo!()
     }
@@ -767,7 +767,7 @@ impl QueueBackend for MyCustomBackend {
         lease_id: &str,
         failure: FailureKind,
         worker_id: Option<&str>,
-    ) -> Result<bool, BackendError> {
+    ) -> Result<bool, StorageError> {
         // Handle activity failure (retry or dead-letter)
         todo!()
     }
@@ -777,7 +777,7 @@ impl QueueBackend for MyCustomBackend {
 
 #[async_trait]
 impl InspectionBackend for MyCustomBackend {
-    async fn stats(&self) -> Result<QueueStats, BackendError> {
+    async fn stats(&self) -> Result<QueueStats, StorageError> {
         // Return queue statistics
         todo!()
     }
@@ -786,7 +786,7 @@ impl InspectionBackend for MyCustomBackend {
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<ActivitySnapshot>, BackendError> {
+    ) -> Result<Vec<ActivitySnapshot>, StorageError> {
         // List pending activities
         todo!()
     }

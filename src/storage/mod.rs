@@ -8,16 +8,16 @@
 //!
 //! The backend abstraction consists of:
 //!
-//! - [`QueueBackend`]: Core queue operations (enqueue, dequeue, ack)
-//! - [`InspectionBackend`]: Observability operations (stats, listing, events)
-//! - [`Backend`]: Combined super-trait for full-featured backends
-//! - [`BackendError`]: Backend-agnostic error type
+//! - [`QueueStorage`]: Core queue operations (enqueue, dequeue, ack)
+//! - [`InspectionStorage`]: Observability operations (stats, listing, events)
+//! - [`Storage`]: Combined super-trait for full-featured backends
+//! - [`StorageError`]: Backend-agnostic error type
 //!
 //! # Using a Custom Backend
 //!
 //! ```rust,ignore
 //! use runner_q::WorkerEngine;
-//! use runner_q::backend::Backend;
+//! use runner_q::storage::Backend;
 //! use std::sync::Arc;
 //!
 //! // Your custom backend implementation
@@ -48,7 +48,7 @@ pub mod redis;
 mod traits;
 
 // Re-export error type
-pub use error::BackendError;
+pub use error::StorageError;
 
 // Re-export trait types (includes re-exports from observability)
 pub use traits::{
@@ -58,18 +58,18 @@ pub use traits::{
     // Backend domain types
     ActivityResult,
     ActivitySnapshot,
-    // Traits
-    Backend,
     DeadLetterRecord,
     DequeuedActivity,
     FailureKind,
     IdempotencyBehavior,
-    InspectionBackend,
+    InspectionStorage,
     PriorityBreakdown,
-    QueueBackend,
     QueueStats,
+    QueueStorage,
     QueuedActivity,
     ResultState,
+    // Traits
+    Storage,
 };
 
 // Re-export Redis backend

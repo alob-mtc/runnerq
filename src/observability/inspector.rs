@@ -14,9 +14,9 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::activity::activity::{Activity, ActivityStatus};
-use crate::backend::Backend;
 use crate::observability::models::{ActivityEvent, ActivitySnapshot, DeadLetterRecord, QueueStats};
 use crate::runner::error::WorkerError;
+use crate::storage::Storage;
 
 /// Queue inspector for observability operations.
 ///
@@ -27,7 +27,7 @@ pub struct QueueInspector {
     redis_pool: Option<Pool<RedisConnectionManager>>,
     queue_name: String,
     max_workers: Option<usize>,
-    backend: Option<Arc<dyn Backend>>,
+    backend: Option<Arc<dyn Storage>>,
 }
 
 impl QueueInspector {
@@ -42,7 +42,7 @@ impl QueueInspector {
     }
 
     /// Create a new inspector from a custom backend.
-    pub fn from_backend(backend: Arc<dyn Backend>) -> Self {
+    pub fn from_backend(backend: Arc<dyn Storage>) -> Self {
         Self {
             redis_pool: None,
             queue_name: String::new(),
@@ -309,7 +309,7 @@ impl QueueInspector {
                     snapshots.push(snapshot);
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to parse scheduled activity JSON");
+                    warn!(error = %e, "Failed to parse scheduled activity JSON");
                 }
             }
         }
@@ -355,7 +355,7 @@ impl QueueInspector {
                     });
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "queue_inspector: failed to parse dead letter entry");
+                    warn!(error = %e, "queue_inspector: failed to parse dead letter entry");
                 }
             }
         }
@@ -676,7 +676,7 @@ impl QueueInspector {
     }
 
     /// Convert a backend ActivitySnapshot to a queue ActivitySnapshot
-    fn convert_backend_snapshot(snapshot: crate::backend::ActivitySnapshot) -> ActivitySnapshot {
+    fn convert_backend_snapshot(snapshot: crate::storage::ActivitySnapshot) -> ActivitySnapshot {
         ActivitySnapshot {
             id: snapshot.id,
             activity_type: snapshot.activity_type,
@@ -705,7 +705,7 @@ impl QueueInspector {
     }
 
     /// Convert a backend DeadLetterRecord to a local DeadLetterRecord
-    fn convert_backend_dead_letter(record: crate::backend::DeadLetterRecord) -> DeadLetterRecord {
+    fn convert_backend_dead_letter(record: crate::storage::DeadLetterRecord) -> DeadLetterRecord {
         DeadLetterRecord {
             activity: Self::convert_backend_snapshot(record.activity),
             error: record.error,
@@ -715,7 +715,7 @@ impl QueueInspector {
 
     /// Convert a backend ActivityEvent to a queue ActivityEvent.
     /// Since both backend and observability use the same types, this is now a simple passthrough.
-    fn convert_backend_event(event: crate::backend::ActivityEvent) -> ActivityEvent {
+    fn convert_backend_event(event: crate::storage::ActivityEvent) -> ActivityEvent {
         // The backend re-exports ActivityEvent from observability, so types are identical
         event
     }

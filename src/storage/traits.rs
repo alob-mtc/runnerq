@@ -7,15 +7,15 @@
 //!
 //! The backend abstraction is split into two main traits:
 //!
-//! - [`QueueBackend`]: Core queue operations (enqueue, dequeue, ack, etc.)
-//! - [`InspectionBackend`]: Observability operations (stats, listing, history)
+//! - [`QueueStorage`]: Core queue operations (enqueue, dequeue, ack, etc.)
+//! - [`InspectionStorage`]: Observability operations (stats, listing, history)
 //!
-//! Implementations that provide both can implement the [`Backend`] super-trait.
+//! Implementations that provide both can implement the [`Storage`] super-trait.
 //!
 //! # Example: Implementing a Custom Backend
 //!
 //! ```rust,ignore
-//! use runner_q::backend::{QueueBackend, InspectionBackend, BackendError};
+//! use runner_q::storage::{QueueBackend, InspectionBackend, StorageError};
 //! use async_trait::async_trait;
 //!
 //! pub struct MyBackend { /* ... */ }
@@ -39,7 +39,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use super::error::BackendError;
+use super::error::StorageError;
 use crate::ActivityPriority;
 
 // Re-export observability types used in traits
@@ -53,7 +53,7 @@ pub use crate::observability::{
 
 /// An activity ready to be enqueued.
 ///
-/// This is the input type for [`QueueBackend::enqueue`]. It contains all the
+/// This is the input type for [`QueueStorage::enqueue`]. It contains all the
 /// information needed to persist and later execute an activity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedActivity {
@@ -177,16 +177,16 @@ pub struct PriorityBreakdown {
 ///
 /// - All methods are async and should be implemented efficiently
 /// - Implementations should handle their own connection pooling
-/// - Errors should be mapped to [`BackendError`] variants
+/// - Errors should be mapped to [`StorageError`] variants
 /// - The `lease_id` from `dequeue` must be passed to ack methods
 #[async_trait]
-pub trait QueueBackend: Send + Sync {
+pub trait QueueStorage: Send + Sync {
     /// Enqueue an activity for immediate or scheduled execution.
     ///
     /// If `scheduled_at` is `Some`, the activity should be stored for later
     /// execution at that time. Otherwise, it should be immediately available
     /// for dequeue.
-    async fn enqueue(&self, activity: QueuedActivity) -> Result<(), BackendError>;
+    async fn enqueue(&self, activity: QueuedActivity) -> Result<(), StorageError>;
 
     /// Try to dequeue one activity for processing.
     ///
@@ -197,7 +197,7 @@ pub trait QueueBackend: Send + Sync {
         &self,
         worker_id: &str,
         timeout: std::time::Duration,
-    ) -> Result<Option<DequeuedActivity>, BackendError>;
+    ) -> Result<Option<DequeuedActivity>, StorageError>;
 
     /// Mark a dequeued activity as successfully completed.
     ///
@@ -208,7 +208,7 @@ pub trait QueueBackend: Send + Sync {
         lease_id: &str,
         result: Option<Value>,
         worker_id: &str,
-    ) -> Result<(), BackendError>;
+    ) -> Result<(), StorageError>;
 
     /// Mark a dequeued activity as failed.
     ///
@@ -224,19 +224,19 @@ pub trait QueueBackend: Send + Sync {
         lease_id: &str,
         failure: FailureKind,
         worker_id: &str,
-    ) -> Result<bool, BackendError>;
+    ) -> Result<bool, StorageError>;
 
     /// Process scheduled activities that are ready to run.
     ///
     /// Should move activities whose `scheduled_at` time has passed to the
     /// ready queue. Returns the number of activities processed.
-    async fn process_scheduled(&self) -> Result<u64, BackendError>;
+    async fn process_scheduled(&self) -> Result<u64, StorageError>;
 
     /// Requeue expired leases back to the ready queue.
     ///
     /// This is the "reaper" function that handles activities whose workers
     /// crashed or timed out. Returns the number of activities requeued.
-    async fn requeue_expired(&self, batch_size: usize) -> Result<u64, BackendError>;
+    async fn requeue_expired(&self, batch_size: usize) -> Result<u64, StorageError>;
 
     /// Extend the lease for an activity currently being processed.
     ///
@@ -245,17 +245,17 @@ pub trait QueueBackend: Send + Sync {
         &self,
         activity_id: Uuid,
         extend_by: std::time::Duration,
-    ) -> Result<bool, BackendError>;
+    ) -> Result<bool, StorageError>;
 
     /// Store the result of a completed activity.
     async fn store_result(
         &self,
         activity_id: Uuid,
         result: ActivityResult,
-    ) -> Result<(), BackendError>;
+    ) -> Result<(), StorageError>;
 
     /// Retrieve a stored activity result.
-    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, BackendError>;
+    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError>;
 
     /// Evaluate idempotency rules before enqueueing.
     ///
@@ -266,11 +266,11 @@ pub trait QueueBackend: Send + Sync {
     async fn check_idempotency(
         &self,
         activity: &QueuedActivity,
-    ) -> Result<Option<Uuid>, BackendError>;
+    ) -> Result<Option<Uuid>, StorageError>;
 }
 
 // ============================================================================
-// InspectionBackend Trait - Observability operations
+// InspectionStorage Trait - Observability operations
 // ============================================================================
 
 /// Trait for observability and inspection operations.
@@ -278,62 +278,62 @@ pub trait QueueBackend: Send + Sync {
 /// This trait provides read-only access to queue state for monitoring,
 /// debugging, and building UIs.
 #[async_trait]
-pub trait InspectionBackend: Send + Sync {
+pub trait InspectionStorage: Send + Sync {
     /// Get current queue statistics.
-    async fn stats(&self) -> Result<QueueStats, BackendError>;
+    async fn stats(&self) -> Result<QueueStats, StorageError>;
 
     /// List activities in the pending queue.
     async fn list_pending(
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<ActivitySnapshot>, BackendError>;
+    ) -> Result<Vec<ActivitySnapshot>, StorageError>;
 
     /// List activities currently being processed.
     async fn list_processing(
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<ActivitySnapshot>, BackendError>;
+    ) -> Result<Vec<ActivitySnapshot>, StorageError>;
 
     /// List activities scheduled for future execution.
     async fn list_scheduled(
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<ActivitySnapshot>, BackendError>;
+    ) -> Result<Vec<ActivitySnapshot>, StorageError>;
 
     /// List completed activities (recent).
     async fn list_completed(
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<ActivitySnapshot>, BackendError>;
+    ) -> Result<Vec<ActivitySnapshot>, StorageError>;
 
     /// List activities in the dead letter queue.
     async fn list_dead_letter(
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<Vec<DeadLetterRecord>, BackendError>;
+    ) -> Result<Vec<DeadLetterRecord>, StorageError>;
 
     /// Get a specific activity by ID.
     async fn get_activity(
         &self,
         activity_id: Uuid,
-    ) -> Result<Option<ActivitySnapshot>, BackendError>;
+    ) -> Result<Option<ActivitySnapshot>, StorageError>;
 
     /// Get recent events for an activity.
     async fn get_activity_events(
         &self,
         activity_id: Uuid,
         limit: usize,
-    ) -> Result<Vec<ActivityEvent>, BackendError>;
+    ) -> Result<Vec<ActivityEvent>, StorageError>;
 
     /// Stream real-time activity events.
     ///
     /// Returns a stream that yields events as they occur.
-    fn event_stream(&self) -> BoxStream<'static, Result<ActivityEvent, BackendError>>;
+    fn event_stream(&self) -> BoxStream<'static, Result<ActivityEvent, StorageError>>;
 }
 
 // ============================================================================
@@ -343,8 +343,8 @@ pub trait InspectionBackend: Send + Sync {
 /// Combined trait for backends that provide both queue and inspection capabilities.
 ///
 /// Most backends will implement this trait, which simply requires implementing
-/// both [`QueueBackend`] and [`InspectionBackend`].
-pub trait Backend: QueueBackend + InspectionBackend {}
+/// both [`QueueStorage`] and [`InspectionStorage`].
+pub trait Storage: QueueStorage + InspectionStorage {}
 
 // Blanket implementation: any type implementing both traits automatically implements Backend
-impl<T: QueueBackend + InspectionBackend> Backend for T {}
+impl<T: QueueStorage + InspectionStorage> Storage for T {}

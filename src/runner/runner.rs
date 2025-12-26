@@ -2,12 +2,12 @@ use crate::activity::activity::{
     Activity, ActivityFuture, ActivityHandler, ActivityHandlerRegistry, ActivityOption,
     ActivityPriority, OnDuplicate,
 };
-use crate::backend::redis::RedisConfig;
-use crate::backend::{Backend, FailureKind, IdempotencyBehavior, QueuedActivity};
 use crate::config::WorkerConfig;
 use crate::observability::QueueInspector;
 use crate::queue::queue::{ActivityQueueTrait, ActivityResult, ResultState};
 use crate::runner::error::WorkerError;
+use crate::storage::redis::RedisConfig;
+use crate::storage::{FailureKind, IdempotencyBehavior, QueuedActivity, Storage};
 use crate::{ActivityContext, ActivityError, RedisBackend};
 use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
@@ -128,7 +128,7 @@ impl Backoff {
 
 pub struct WorkerEngine {
     activity_queue: Arc<dyn ActivityQueueTrait>,
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Storage>,
     activity_handlers: ActivityHandlerRegistry, // kept as-is per request
     config: WorkerConfig,
     running: Arc<RwLock<bool>>, // retains external visibility
@@ -202,7 +202,7 @@ impl WorkerEngine {
     /// ```
     pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-        let backend: Arc<dyn Backend> = Arc::new(
+        let backend: Arc<dyn Storage> = Arc::new(
             RedisBackend::new(redis_pool, config.queue_name.clone())
                 .with_lease_ms(config.lease_ms.unwrap_or(60_000)),
         );
@@ -225,9 +225,9 @@ impl WorkerEngine {
     ///
     /// # Parameters
     ///
-    /// * `backend` - Custom backend implementing the [`Backend`] trait
+    /// * `backend` - Custom backend implementing the [`Storage`] trait
     /// * `config` - Configuration settings for the worker engine
-    pub fn new_with_backend(backend: Arc<dyn Backend>, config: WorkerConfig) -> Self {
+    pub fn new_with_backend(backend: Arc<dyn Storage>, config: WorkerConfig) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let adapter = Arc::new(BackendQueueAdapter::new(backend.clone()));
         Self {
@@ -1044,7 +1044,7 @@ pub struct WorkerEngineBuilder {
     schedule_poll_interval: Option<Duration>,
     redis_config: Option<RedisConfig>,
     metrics: Option<Arc<dyn MetricsSink>>,
-    backend: Option<Arc<dyn Backend>>,
+    backend: Option<Arc<dyn Storage>>,
 }
 
 impl WorkerEngineBuilder {
@@ -1133,7 +1133,7 @@ impl WorkerEngineBuilder {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use runner_q::{WorkerEngine, backend::{Backend, RedisBackend}};
+    /// use runner_q::{WorkerEngine, storage::{Backend, RedisBackend}};
     /// use std::sync::Arc;
     ///
     /// // Create a custom backend
@@ -1149,7 +1149,7 @@ impl WorkerEngineBuilder {
     ///     .build()
     ///     .await?;
     /// ```
-    pub fn backend(mut self, backend: Arc<dyn Backend>) -> Self {
+    pub fn backend(mut self, backend: Arc<dyn Storage>) -> Self {
         self.backend = Some(backend);
         self
     }
@@ -1567,16 +1567,16 @@ impl ActivityExecutor for WorkerEngineWrapper {
 // BackendQueueAdapter - Bridges Backend trait to ActivityQueueTrait
 // ============================================================================
 
-/// Adapter that wraps a [`Backend`] implementation to provide [`ActivityQueueTrait`] interface.
+/// Adapter that wraps a [`Storage`] implementation to provide [`ActivityQueueTrait`] interface.
 ///
 /// This allows the existing `WorkerEngine` internals to work with custom backends
 /// without requiring changes to the core processing logic.
 struct BackendQueueAdapter {
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Storage>,
 }
 
 impl BackendQueueAdapter {
-    fn new(backend: Arc<dyn Backend>) -> Self {
+    fn new(backend: Arc<dyn Storage>) -> Self {
         Self { backend }
     }
 
@@ -1745,11 +1745,11 @@ impl ActivityQueueTrait for BackendQueueAdapter {
         activity_id: uuid::Uuid,
         result: ActivityResult,
     ) -> Result<(), WorkerError> {
-        let backend_result = crate::backend::ActivityResult {
+        let backend_result = crate::storage::ActivityResult {
             data: result.data,
             state: match result.state {
-                ResultState::Ok => crate::backend::ResultState::Ok,
-                ResultState::Err => crate::backend::ResultState::Err,
+                ResultState::Ok => crate::storage::ResultState::Ok,
+                ResultState::Err => crate::storage::ResultState::Err,
             },
         };
         self.backend
@@ -1766,8 +1766,8 @@ impl ActivityQueueTrait for BackendQueueAdapter {
             Some(backend_result) => Ok(Some(ActivityResult {
                 data: backend_result.data,
                 state: match backend_result.state {
-                    crate::backend::ResultState::Ok => ResultState::Ok,
-                    crate::backend::ResultState::Err => ResultState::Err,
+                    crate::storage::ResultState::Ok => ResultState::Ok,
+                    crate::storage::ResultState::Err => ResultState::Err,
                 },
             })),
             None => Ok(None),

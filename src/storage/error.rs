@@ -14,15 +14,15 @@ use thiserror::Error;
 /// # Examples
 ///
 /// ```rust
-/// use runner_q::backend::BackendError;
+/// use runner_q::storage::StorageError;
 ///
-/// fn handle_error(err: BackendError) {
+/// fn handle_error(err: StorageError) {
 ///     match err {
-///         BackendError::Unavailable(msg) => {
+///         StorageError::Unavailable(msg) => {
 ///             // Connection lost, retry later
 ///             eprintln!("Backend unavailable: {}", msg);
 ///         }
-///         BackendError::NotFound(msg) => {
+///         StorageError::NotFound(msg) => {
 ///             // Resource doesn't exist
 ///             eprintln!("Not found: {}", msg);
 ///         }
@@ -33,7 +33,7 @@ use thiserror::Error;
 /// }
 /// ```
 #[derive(Error, Debug)]
-pub enum BackendError {
+pub enum StorageError {
     /// Backend is unavailable (connection lost, service down, etc.)
     #[error("backend unavailable: {0}")]
     Unavailable(String),
@@ -71,26 +71,26 @@ pub enum BackendError {
     IdempotencyConflict(String),
 }
 
-impl BackendError {
+impl StorageError {
     /// Returns true if this error is potentially recoverable with a retry.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            BackendError::Unavailable(_) | BackendError::Timeout(_) | BackendError::Conflict(_)
+            StorageError::Unavailable(_) | StorageError::Timeout(_) | StorageError::Conflict(_)
         )
     }
 }
 
 // Conversion from serde_json errors
-impl From<serde_json::Error> for BackendError {
+impl From<serde_json::Error> for StorageError {
     fn from(err: serde_json::Error) -> Self {
-        BackendError::Serialization(err.to_string())
+        StorageError::Serialization(err.to_string())
     }
 }
 
 // Conversion from Redis errors
-impl From<redis::RedisError> for BackendError {
+impl From<redis::RedisError> for StorageError {
     fn from(err: redis::RedisError) -> Self {
-        BackendError::Unavailable(err.to_string())
+        StorageError::Unavailable(err.to_string())
     }
 }
