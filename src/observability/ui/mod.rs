@@ -26,6 +26,6 @@ mod axum;
 pub use html::CONSOLE_HTML;
 
 // Re-export framework-specific implementations
-#[cfg(feature = "axum-ui")]
+#[cfg(all(feature = "axum-ui", any(feature = "redis", feature = "postgres")))]
 pub use self::axum::{observability_api, runnerq_ui};
 
