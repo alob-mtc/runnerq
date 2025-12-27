@@ -26,13 +26,6 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
         worker_id: &str,
     ) -> Result<Option<Activity>, WorkerError>;
 
-    /// Assign a worker to an activity that has been dequeued.
-    async fn assign_worker(
-        &self,
-        activity_id: uuid::Uuid,
-        worker_id: &str,
-    ) -> Result<(), WorkerError>;
-
     /// Mark a activity as completed
     async fn mark_completed(&self, activity: &Activity, worker_id: &str)
         -> Result<(), WorkerError>;

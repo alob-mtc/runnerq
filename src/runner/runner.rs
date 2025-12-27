@@ -575,17 +575,7 @@ impl WorkerEngine {
                 // Resolve handler
                 let activity_id = activity.id;
                 let activity_type = activity.activity_type.clone();
-                if let Err(e) = activity_queue
-                    .assign_worker(activity_id, worker_label.as_str())
-                    .await
-                {
-                    error!(
-                        %worker_id,
-                        activity_id = %activity_id,
-                        error = %e,
-                        "Failed to assign worker to activity"
-                    );
-                }
+
                 debug!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Worker processing activity");
 
                 let handler = match activity_handlers.get(&activity.activity_type) {
@@ -1669,23 +1659,9 @@ impl ActivityQueueTrait for BackendQueueAdapter {
         worker_id: &str,
     ) -> Result<Option<Activity>, WorkerError> {
         match self.backend.dequeue(worker_id, timeout).await? {
-            Some(activity) => {
-                let mut activity = Self::queued_to_activity(&activity);
-                activity.status = crate::ActivityStatus::Running;
-                activity.retry_count = activity.retry_count;
-                Ok(Some(activity))
-            }
+            Some(activity) => Ok(Some(Self::queued_to_activity(&activity))),
             None => Ok(None),
         }
-    }
-
-    async fn assign_worker(
-        &self,
-        _activity_id: uuid::Uuid,
-        _worker_id: &str,
-    ) -> Result<(), WorkerError> {
-        // No-op for backend adapter - assignment happens in dequeue
-        Ok(())
     }
 
     async fn mark_completed(

@@ -247,11 +247,11 @@ pub mod storage;
 
 // Re-export main types for easy access
 pub use crate::config::WorkerConfig;
+#[cfg(feature = "redis")]
+pub use crate::observability::{observability_api, runnerq_ui, QueueInspector};
 pub use crate::observability::{
     ActivityEvent, ActivityEventType, ActivitySnapshot, DeadLetterRecord, QueueStats,
 };
-#[cfg(feature = "redis")]
-pub use crate::observability::{observability_api, runnerq_ui, QueueInspector};
 pub use crate::runner::error::WorkerError;
 pub use crate::runner::runner::{
     ActivityBuilder, ActivityExecutor, MetricsSink, WorkerEngine, WorkerEngineBuilder,
