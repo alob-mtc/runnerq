@@ -36,7 +36,7 @@ default = []
 postgres = ["dep:sqlx", "dep:async-stream"]
 
 [dependencies.sqlx]
-version = "0.8"
+version = "0.8.6"
 features = ["runtime-tokio", "postgres", "chrono", "uuid", "json"]
 optional = true
 
@@ -45,5 +45,5 @@ version = "0.3"
 optional = true
 
 [dev-dependencies]
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid", "json"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres", "chrono", "uuid", "json"] }
 async-stream = "0.3"

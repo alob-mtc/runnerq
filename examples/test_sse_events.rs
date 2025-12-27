@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     // Build worker engine
     let mut engine = WorkerEngine::builder()
         .backend(Arc::new(backend))
-        .max_workers(10)
+        .max_workers(4)
         .build()
         .await?;
 

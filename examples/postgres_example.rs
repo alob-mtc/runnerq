@@ -23,7 +23,10 @@
 
 use async_trait::async_trait;
 use axum::{serve, Router};
-use runner_q::{runnerq_ui, storage::PostgresBackend, ActivityContext, ActivityError, ActivityHandler, ActivityHandlerResult, WorkerEngine};
+use runner_q::{
+    runnerq_ui, storage::PostgresBackend, ActivityContext, ActivityError, ActivityHandler,
+    ActivityHandlerResult, WorkerEngine,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
@@ -67,33 +70,32 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
-        // Get database URL from environment
-        let database_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://postgres:runnerq@localhost:5432/runnerq".to_string());
+    // Get database URL from environment
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:runnerq@localhost:5432/runnerq".to_string());
 
-        info!("=== RunnerQ PostgreSQL Backend Example ===");
-        let safe_url = format!(
-            "{}@...",
-            &database_url[..database_url.find('@').unwrap_or(database_url.len())]
-        );
-        info!("Connecting to PostgreSQL at: {}", safe_url);
+    info!("=== RunnerQ PostgreSQL Backend Example ===");
+    let safe_url = format!(
+        "{}@...",
+        &database_url[..database_url.find('@').unwrap_or(database_url.len())]
+    );
+    info!("Connecting to PostgreSQL at: {}", safe_url);
 
-        // Create PostgreSQL backend
-        let backend = PostgresBackend::new(&database_url, "example_queue").await?;
-        let backend = Arc::new(backend);
+    // Create PostgreSQL backend
+    let backend = PostgresBackend::new(&database_url, "example_queue_22").await?;
+    let backend = Arc::new(backend);
 
-        info!("✓ PostgreSQL backend initialized");
-        info!("✓ Database schema created/verified");
+    info!("✓ PostgreSQL backend initialized");
+    info!("✓ Database schema created/verified");
 
-        // Create worker engine with the PostgreSQL backend
-        let mut engine = WorkerEngine::builder()
-            .backend(backend.clone())
-            .max_workers(10)
-            .build()
-            .await?;
+    // Create worker engine with the PostgreSQL backend
+    let mut engine = WorkerEngine::builder()
+        .backend(backend.clone())
+        .max_workers(4)
+        .build()
+        .await?;
 
-        info!("✓ Worker engine created with 4 workers");
-
+    info!("✓ Worker engine created with 4 workers");
 
     // Register test activity handler
     engine.register_activity("test_activity".to_string(), Arc::new(TestActivity));
@@ -158,25 +160,25 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8081").await?;
     let bound_addr = listener.local_addr()?;
 
-        println!("\n╔══════════════════════════════════════════════════════════╗");
-        println!("║  🐘 RunnerQ PostgreSQL Backend Example                   ║");
-        println!("╠══════════════════════════════════════════════════════════╣");
-        println!(
-            "║  Console UI:  http://{}/console                  ║",
-            bound_addr
-        );
-        println!(
-            "║  SSE Stream:  http://{}/console/api/observability/stream ║",
-            bound_addr
-        );
-        println!("╠══════════════════════════════════════════════════════════╣");
-        println!("║  Features:                                               ║");
-        println!("║    • Permanent persistence (no TTL)                      ║");
-        println!("║    • Multi-node safe (FOR UPDATE SKIP LOCKED)            ║");
-        println!("║    • Cross-process events (PostgreSQL LISTEN/NOTIFY)     ║");
-        println!("╠══════════════════════════════════════════════════════════╣");
-        println!("║  Press Ctrl+C to stop                                    ║");
-        println!("╚══════════════════════════════════════════════════════════╝\n");
+    println!("\n╔══════════════════════════════════════════════════════════╗");
+    println!("║  🐘 RunnerQ PostgreSQL Backend Example                   ║");
+    println!("╠══════════════════════════════════════════════════════════╣");
+    println!(
+        "║  Console UI:  http://{}/console                  ║",
+        bound_addr
+    );
+    println!(
+        "║  SSE Stream:  http://{}/console/api/observability/stream ║",
+        bound_addr
+    );
+    println!("╠══════════════════════════════════════════════════════════╣");
+    println!("║  Features:                                               ║");
+    println!("║    • Permanent persistence (no TTL)                      ║");
+    println!("║    • Multi-node safe (FOR UPDATE SKIP LOCKED)            ║");
+    println!("║    • Cross-process events (PostgreSQL LISTEN/NOTIFY)     ║");
+    println!("╠══════════════════════════════════════════════════════════╣");
+    println!("║  Press Ctrl+C to stop                                    ║");
+    println!("╚══════════════════════════════════════════════════════════╝\n");
 
     serve(listener, app).await?;
 

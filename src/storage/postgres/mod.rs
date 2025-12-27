@@ -69,8 +69,8 @@ use uuid::Uuid;
 use crate::activity::activity::{ActivityPriority, ActivityStatus};
 use crate::observability::{ActivityEvent, ActivityEventType, ActivitySnapshot, DeadLetterRecord};
 use crate::storage::{
-    ActivityResult, FailureKind, IdempotencyBehavior, InspectionStorage,
-    QueueStats, QueueStorage, QueuedActivity, ResultState, StorageError,
+    ActivityResult, FailureKind, IdempotencyBehavior, InspectionStorage, QueueStats, QueueStorage,
+    QueuedActivity, ResultState, StorageError,
 };
 
 // ============================================================================
@@ -94,12 +94,61 @@ pub struct PostgresBackend {
 }
 
 impl PostgresBackend {
+    /// Validate that a queue name is safe for use in PostgreSQL identifiers.
+    ///
+    /// Valid queue names must:
+    /// - Be non-empty
+    /// - Start with a letter (a-z, A-Z) or underscore
+    /// - Contain only letters, digits (0-9), and underscores
+    /// - Be at most 63 characters (PostgreSQL identifier limit)
+    fn validate_queue_name(queue_name: &str) -> Result<(), StorageError> {
+        if queue_name.is_empty() {
+            return Err(StorageError::Configuration(
+                "queue_name cannot be empty".to_string(),
+            ));
+        }
+
+        // PostgreSQL identifier max length is 63 bytes (NAMEDATALEN - 1)
+        // We reserve some space for the "runnerq_events_" prefix (15 chars)
+        if queue_name.len() > 48 {
+            return Err(StorageError::Configuration(format!(
+                "queue_name '{}' is too long (max 48 characters)",
+                queue_name
+            )));
+        }
+
+        let mut chars = queue_name.chars();
+
+        // First character must be a letter or underscore
+        if let Some(first) = chars.next() {
+            if !first.is_ascii_alphabetic() && first != '_' {
+                return Err(StorageError::Configuration(format!(
+                    "queue_name '{}' must start with a letter or underscore",
+                    queue_name
+                )));
+            }
+        }
+
+        // Remaining characters must be letters, digits, or underscores
+        for c in chars {
+            if !c.is_ascii_alphanumeric() && c != '_' {
+                return Err(StorageError::Configuration(format!(
+                    "queue_name '{}' contains invalid character '{}'; only letters, digits, and underscores are allowed",
+                    queue_name, c
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Create a new PostgreSQL backend.
     ///
     /// # Arguments
     ///
     /// * `database_url` - PostgreSQL connection URL (e.g., `postgres://user:pass@host:5432/db`)
-    /// * `queue_name` - Name of the queue (used for namespacing)
+    /// * `queue_name` - Name of the queue (used for namespacing). Must be a valid identifier:
+    ///   starts with letter or underscore, contains only letters, digits, underscores.
     ///
     /// # Example
     ///
@@ -118,7 +167,8 @@ impl PostgresBackend {
     /// # Arguments
     ///
     /// * `database_url` - PostgreSQL connection URL
-    /// * `queue_name` - Name of the queue
+    /// * `queue_name` - Name of the queue. Must be a valid identifier:
+    ///   starts with letter or underscore, contains only letters, digits, underscores.
     /// * `default_lease_ms` - Default lease duration in milliseconds
     /// * `pool_size` - Maximum number of connections in the pool
     pub async fn with_config(
@@ -127,6 +177,9 @@ impl PostgresBackend {
         default_lease_ms: i64,
         pool_size: u32,
     ) -> Result<Self, StorageError> {
+        // Validate queue_name before using it
+        Self::validate_queue_name(queue_name)?;
+
         let pool = PgPoolOptions::new()
             .max_connections(pool_size)
             .connect(database_url)
@@ -203,7 +256,10 @@ impl PostgresBackend {
         // Escape single quotes in payload for SQL
         let escaped_payload = payload.replace('\'', "''");
 
-        sqlx::query(&format!("NOTIFY {}, '{}'", channel, escaped_payload))
+        // Quote the channel name as a PostgreSQL identifier (double-quote and escape any internal double-quotes)
+        let quoted_channel = Self::quote_identifier(&channel);
+
+        sqlx::query(&format!("NOTIFY {}, '{}'", quoted_channel, escaped_payload))
             .execute(&self.pool)
             .await
             .map_err(|e| StorageError::Internal(format!("Failed to notify: {}", e)))?;
@@ -211,10 +267,23 @@ impl PostgresBackend {
         Ok(())
     }
 
+    /// Quote a string as a PostgreSQL identifier (double-quoted).
+    ///
+    /// This escapes any internal double-quotes by doubling them.
+    fn quote_identifier(name: &str) -> String {
+        // Escape internal double-quotes by doubling them
+        let escaped = name.replace('"', "\"\"");
+        format!("\"{}\"", escaped)
+    }
+
     /// Get the PostgreSQL NOTIFY channel name for this queue.
+    ///
+    /// Since queue_name is validated at construction to only contain
+    /// [A-Za-z0-9_], this produces a safe identifier.
     fn notification_channel(&self) -> String {
-        // Channel names must be valid identifiers, so we sanitize the queue name
-        format!("runnerq_events_{}", self.queue_name.replace('-', "_"))
+        // Channel names must be valid identifiers
+        // queue_name is already validated at construction to only contain safe characters
+        format!("runnerq_events_{}", self.queue_name)
     }
 
     /// Convert priority enum to integer for sorting.
@@ -345,7 +414,6 @@ impl QueueStorage for PostgresBackend {
 
         match result {
             Some(row) => {
-                let lease_ms = deadline.timestamp_millis();
                 let activity = row.to_queued_activity()?;
 
                 self.record_event(
@@ -356,16 +424,17 @@ impl QueueStorage for PostgresBackend {
                 )
                 .await?;
 
-                // Extend lease if needed
-                let lease_secs = (lease_ms / 1000) as u64;
-                if lease_secs < activity.timeout_seconds {
-                    let delta = activity.timeout_seconds - lease_secs;
-                    if delta > 0 {
-                        let lease_buffer = 10;
-                        let _ = self
-                            .extend_lease(activity.id, Duration::from_secs(delta + lease_buffer))
-                            .await;
-                    }
+                // Extend lease if default lease is shorter than activity timeout
+                let default_lease_secs = (self.default_lease_ms / 1000) as u64;
+                if default_lease_secs < activity.timeout_seconds {
+                    let additional_secs = activity.timeout_seconds - default_lease_secs;
+                    let lease_buffer = 10;
+                    let _ = self
+                        .extend_lease(
+                            activity.id,
+                            Duration::from_secs(additional_secs + lease_buffer),
+                        )
+                        .await;
                 }
 
                 debug!(
