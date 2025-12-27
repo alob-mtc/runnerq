@@ -47,6 +47,10 @@ mod error;
 pub mod redis;
 mod traits;
 
+// PostgreSQL backend (in development)
+#[cfg(feature = "postgres")]
+pub mod postgres;
+
 // Re-export error type
 pub use error::StorageError;
 
@@ -74,3 +78,7 @@ pub use traits::{
 
 // Re-export Redis backend
 pub use redis::RedisBackend;
+
+// Re-export PostgreSQL backend (in development)
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresBackend;

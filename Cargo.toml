@@ -29,3 +29,21 @@ axum = { version = "0.7", features = ["json"] }
 anyhow = "1.0"
 tower-http = { version = "0.5", features = ["cors"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+
+[features]
+default = []
+# PostgreSQL backend (in development - not recommended for production)
+postgres = ["dep:sqlx", "dep:async-stream"]
+
+[dependencies.sqlx]
+version = "0.8"
+features = ["runtime-tokio", "postgres", "chrono", "uuid", "json"]
+optional = true
+
+[dependencies.async-stream]
+version = "0.3"
+optional = true
+
+[dev-dependencies]
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid", "json"] }
+async-stream = "0.3"
