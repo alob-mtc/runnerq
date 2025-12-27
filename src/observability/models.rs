@@ -79,38 +79,6 @@ pub struct ActivitySnapshot {
 }
 
 impl ActivitySnapshot {
-    /// Create a snapshot from an internal Activity.
-    pub(crate) fn from_activity(activity: &crate::activity::activity::Activity) -> Self {
-        Self {
-            id: activity.id,
-            activity_type: activity.activity_type.clone(),
-            payload: activity.payload.clone(),
-            priority: activity.priority.clone(),
-            status: activity.status.clone(),
-            created_at: activity.created_at,
-            scheduled_at: activity.scheduled_at,
-            started_at: None,
-            completed_at: None,
-            current_worker_id: None,
-            last_worker_id: None,
-            retry_count: activity.retry_count,
-            max_retries: activity.max_retries,
-            timeout_seconds: activity.timeout_seconds,
-            retry_delay_seconds: activity.retry_delay_seconds,
-            metadata: activity.metadata.clone(),
-            last_error: None,
-            last_error_at: None,
-            status_updated_at: Utc::now(),
-            score: None,
-            lease_deadline_ms: None,
-            processing_member: None,
-            idempotency_key: activity
-                .idempotency_key
-                .as_ref()
-                .map(|(key, _)| key.clone()),
-        }
-    }
-
     /// Update the status and timestamp.
     pub fn update_status(&mut self, status: ActivityStatus, timestamp: DateTime<Utc>) {
         self.status = status;

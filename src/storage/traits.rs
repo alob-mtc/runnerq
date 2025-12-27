@@ -165,6 +165,20 @@ pub struct PriorityBreakdown {
 }
 
 // ============================================================================
+// ResultStorage Trait - Result retrieval operations
+// ============================================================================
+
+/// Trait for retrieving activity results.
+///
+/// This trait is shared between queue and inspection operations to avoid
+/// method duplication.
+#[async_trait]
+pub trait ResultStorage: Send + Sync {
+    /// Retrieve a stored activity result.
+    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError>;
+}
+
+// ============================================================================
 // QueueStorage Trait - Core queue operations
 // ============================================================================
 
@@ -180,7 +194,7 @@ pub struct PriorityBreakdown {
 /// - Errors should be mapped to [`StorageError`] variants
 /// - The `lease_id` from `dequeue` must be passed to ack methods
 #[async_trait]
-pub trait QueueStorage: Send + Sync {
+pub trait QueueStorage: ResultStorage + Send + Sync {
     /// Enqueue an activity for immediate or scheduled execution.
     ///
     /// If `scheduled_at` is `Some`, the activity should be stored for later
@@ -197,15 +211,12 @@ pub trait QueueStorage: Send + Sync {
         &self,
         worker_id: &str,
         timeout: std::time::Duration,
-    ) -> Result<Option<DequeuedActivity>, StorageError>;
+    ) -> Result<Option<QueuedActivity>, StorageError>;
 
     /// Mark a dequeued activity as successfully completed.
-    ///
-    /// The `lease_id` must match the one returned from `dequeue`.
     async fn ack_success(
         &self,
         activity_id: Uuid,
-        lease_id: &str,
         result: Option<Value>,
         worker_id: &str,
     ) -> Result<(), StorageError>;
@@ -221,7 +232,6 @@ pub trait QueueStorage: Send + Sync {
     async fn ack_failure(
         &self,
         activity_id: Uuid,
-        lease_id: &str,
         failure: FailureKind,
         worker_id: &str,
     ) -> Result<bool, StorageError>;
@@ -254,9 +264,6 @@ pub trait QueueStorage: Send + Sync {
         result: ActivityResult,
     ) -> Result<(), StorageError>;
 
-    /// Retrieve a stored activity result.
-    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError>;
-
     /// Evaluate idempotency rules before enqueueing.
     ///
     /// Returns:
@@ -278,7 +285,7 @@ pub trait QueueStorage: Send + Sync {
 /// This trait provides read-only access to queue state for monitoring,
 /// debugging, and building UIs.
 #[async_trait]
-pub trait InspectionStorage: Send + Sync {
+pub trait InspectionStorage: ResultStorage + Send + Sync {
     /// Get current queue statistics.
     async fn stats(&self) -> Result<QueueStats, StorageError>;
 

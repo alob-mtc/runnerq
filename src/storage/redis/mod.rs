@@ -213,6 +213,17 @@ impl Default for RedisBackendBuilder {
 }
 
 // ============================================================================
+// ResultStorage Implementation
+// ============================================================================
+
+#[async_trait]
+impl ResultStorage for RedisBackend {
+    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError> {
+        queue::get_result(self, activity_id).await
+    }
+}
+
+// ============================================================================
 // QueueStorage Implementation
 // ============================================================================
 
@@ -226,28 +237,26 @@ impl QueueStorage for RedisBackend {
         &self,
         worker_id: &str,
         timeout: Duration,
-    ) -> Result<Option<DequeuedActivity>, StorageError> {
+    ) -> Result<Option<QueuedActivity>, StorageError> {
         queue::dequeue(self, worker_id, timeout).await
     }
 
     async fn ack_success(
         &self,
         activity_id: Uuid,
-        lease_id: &str,
         result: Option<serde_json::Value>,
         worker_id: &str,
     ) -> Result<(), StorageError> {
-        queue::ack_success(self, activity_id, lease_id, result, worker_id).await
+        queue::ack_success(self, activity_id, result, worker_id).await
     }
 
     async fn ack_failure(
         &self,
         activity_id: Uuid,
-        lease_id: &str,
         failure: FailureKind,
         worker_id: &str,
     ) -> Result<bool, StorageError> {
-        queue::ack_failure(self, activity_id, lease_id, failure, worker_id).await
+        queue::ack_failure(self, activity_id, failure, worker_id).await
     }
 
     async fn process_scheduled(&self) -> Result<u64, StorageError> {
@@ -272,10 +281,6 @@ impl QueueStorage for RedisBackend {
         result: ActivityResult,
     ) -> Result<(), StorageError> {
         queue::store_result(self, activity_id, result).await
-    }
-
-    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError> {
-        queue::get_result(self, activity_id).await
     }
 
     async fn check_idempotency(

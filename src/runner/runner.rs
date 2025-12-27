@@ -3,15 +3,18 @@ use crate::activity::activity::{
     ActivityPriority, OnDuplicate,
 };
 use crate::config::WorkerConfig;
-use crate::observability::QueueInspector;
 use crate::queue::queue::{ActivityQueueTrait, ActivityResult, ResultState};
 use crate::runner::error::WorkerError;
-use crate::storage::redis::RedisConfig;
 use crate::storage::{FailureKind, IdempotencyBehavior, QueuedActivity, Storage};
-use crate::{ActivityContext, ActivityError, RedisBackend};
-use bb8_redis::bb8::Pool;
-use bb8_redis::RedisConnectionManager;
+use crate::{ActivityContext, ActivityError};
 use chrono::Utc;
+
+#[cfg(any(feature = "redis", feature = "postgres"))]
+use crate::observability::QueueInspector;
+#[cfg(feature = "redis")]
+use crate::storage::redis::RedisConfig;
+#[cfg(feature = "redis")]
+use crate::RedisBackend;
 use futures::FutureExt;
 use serde_json::json;
 use std::panic::AssertUnwindSafe;
@@ -200,7 +203,11 @@ impl WorkerEngine {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig) -> Self {
+    #[cfg(feature = "redis")]
+    pub fn new(
+        redis_pool: bb8_redis::bb8::Pool<bb8_redis::RedisConnectionManager>,
+        config: WorkerConfig,
+    ) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let backend: Arc<dyn Storage> = Arc::new(
             RedisBackend::new(redis_pool, config.queue_name.clone())
@@ -250,8 +257,9 @@ impl WorkerEngine {
     ///
     /// The inspector uses the backend's inspection capabilities for
     /// reading queue state and activity information.
+    #[cfg(any(feature = "redis", feature = "postgres"))]
     pub fn inspector(&self) -> QueueInspector {
-        QueueInspector::from_backend(self.backend.clone())
+        QueueInspector::new(self.backend.clone())
             .with_max_workers(self.config.max_concurrent_activities)
     }
 
@@ -567,17 +575,7 @@ impl WorkerEngine {
                 // Resolve handler
                 let activity_id = activity.id;
                 let activity_type = activity.activity_type.clone();
-                if let Err(e) = activity_queue
-                    .assign_worker(activity_id, worker_label.as_str())
-                    .await
-                {
-                    error!(
-                        %worker_id,
-                        activity_id = %activity_id,
-                        error = %e,
-                        "Failed to assign worker to activity"
-                    );
-                }
+
                 debug!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, "Worker processing activity");
 
                 let handler = match activity_handlers.get(&activity.activity_type) {
@@ -712,7 +710,7 @@ impl WorkerEngine {
                                 data: Some(json!({
                                     "error": reason,
                                     "type": "non_retryable",
-                                    "failed_at": chrono::Utc::now().to_rfc3339()
+                                    "failed_at": Utc::now().to_rfc3339()
                                 })),
                                 state: ResultState::Err,
                             };
@@ -1038,10 +1036,12 @@ impl WorkerEngine {
 /// # }
 /// ```
 pub struct WorkerEngineBuilder {
+    #[cfg(feature = "redis")]
     redis_url: Option<String>,
     queue_name: Option<String>,
     max_workers: Option<usize>,
     schedule_poll_interval: Option<Duration>,
+    #[cfg(feature = "redis")]
     redis_config: Option<RedisConfig>,
     metrics: Option<Arc<dyn MetricsSink>>,
     backend: Option<Arc<dyn Storage>>,
@@ -1051,10 +1051,12 @@ impl WorkerEngineBuilder {
     /// Creates a new WorkerEngineBuilder with default values.
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "redis")]
             redis_url: None,
             queue_name: None,
             max_workers: None,
             schedule_poll_interval: None,
+            #[cfg(feature = "redis")]
             redis_config: None,
             metrics: None,
             backend: None,
@@ -1066,6 +1068,7 @@ impl WorkerEngineBuilder {
     /// # Parameters
     ///
     /// * `url` - Redis connection URL (e.g., "redis://localhost:6379")
+    #[cfg(feature = "redis")]
     pub fn redis_url(mut self, url: &str) -> Self {
         self.redis_url = Some(url.to_string());
         self
@@ -1075,7 +1078,7 @@ impl WorkerEngineBuilder {
     ///
     /// # Parameters
     ///
-    /// * `name` - Queue name used as Redis key prefix
+    /// * `name` - Queue name used as key prefix
     pub fn queue_name(mut self, name: &str) -> Self {
         self.queue_name = Some(name.to_string());
         self
@@ -1106,6 +1109,7 @@ impl WorkerEngineBuilder {
     /// # Parameters
     ///
     /// * `config` - Redis connection pool configuration
+    #[cfg(feature = "redis")]
     pub fn redis_config(mut self, config: RedisConfig) -> Self {
         self.redis_config = Some(config);
         self
@@ -1159,11 +1163,11 @@ impl WorkerEngineBuilder {
     /// # Returns
     ///
     /// Returns a `Result<WorkerEngine, WorkerError>` containing the configured engine
-    /// or an error if Redis connection fails.
+    /// or an error if connection fails.
     ///
     /// # Errors
     ///
-    /// Returns `WorkerError` if Redis connection cannot be established.
+    /// Returns `WorkerError` if connection cannot be established.
     pub async fn build(self) -> Result<WorkerEngine, WorkerError> {
         let max_concurrent_activities = self.max_workers.unwrap_or(10);
         let schedule_poll_interval_seconds = self.schedule_poll_interval.map_or(5, |d| d.as_secs());
@@ -1190,35 +1194,45 @@ impl WorkerEngineBuilder {
             return Ok(worker_engine);
         }
 
-        // Default: use Redis backend
-        let redis_url = self
-            .redis_url
-            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
-        let queue_name = self.queue_name.unwrap_or_else(|| "default".to_string());
+        // Default: use Redis backend (requires redis feature)
+        #[cfg(feature = "redis")]
+        {
+            let redis_url = self
+                .redis_url
+                .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+            let queue_name = self.queue_name.unwrap_or_else(|| "default".to_string());
 
-        let config = WorkerConfig {
-            queue_name: queue_name.clone(),
-            max_concurrent_activities,
-            redis_url: redis_url.clone(),
-            schedule_poll_interval_seconds: Some(schedule_poll_interval_seconds),
-            lease_ms: Some(60_000),
-            reaper_interval_seconds: Some(5),
-            reaper_batch_size: Some(100),
-        };
+            let config = WorkerConfig {
+                queue_name: queue_name.clone(),
+                max_concurrent_activities,
+                redis_url: redis_url.clone(),
+                schedule_poll_interval_seconds: Some(schedule_poll_interval_seconds),
+                lease_ms: Some(60_000),
+                reaper_interval_seconds: Some(5),
+                reaper_batch_size: Some(100),
+            };
 
-        let backend = RedisBackend::builder()
-            .redis_url(&redis_url)
-            .queue_name(queue_name)
-            .build()
-            .await?;
-        let mut worker_engine = WorkerEngine::new_with_backend(Arc::new(backend), config);
+            let backend = RedisBackend::builder()
+                .redis_url(&redis_url)
+                .queue_name(queue_name)
+                .build()
+                .await?;
+            let mut worker_engine = WorkerEngine::new_with_backend(Arc::new(backend), config);
 
-        // Apply custom metrics if provided
-        if let Some(metrics) = self.metrics {
-            worker_engine.with_metrics(metrics);
+            // Apply custom metrics if provided
+            if let Some(metrics) = self.metrics {
+                worker_engine.with_metrics(metrics);
+            }
+
+            return Ok(worker_engine);
         }
 
-        Ok(worker_engine)
+        #[cfg(not(feature = "redis"))]
+        {
+            Err(WorkerError::Configuration(
+                "No backend configured. Either provide a custom backend via .backend() or enable the 'redis' feature".to_string()
+            ))
+        }
     }
 }
 
@@ -1645,23 +1659,9 @@ impl ActivityQueueTrait for BackendQueueAdapter {
         worker_id: &str,
     ) -> Result<Option<Activity>, WorkerError> {
         match self.backend.dequeue(worker_id, timeout).await? {
-            Some(dequeued) => {
-                let mut activity = Self::queued_to_activity(&dequeued.activity);
-                activity.status = crate::ActivityStatus::Running;
-                activity.retry_count = dequeued.attempt.saturating_sub(1);
-                Ok(Some(activity))
-            }
+            Some(activity) => Ok(Some(Self::queued_to_activity(&activity))),
             None => Ok(None),
         }
-    }
-
-    async fn assign_worker(
-        &self,
-        _activity_id: uuid::Uuid,
-        _worker_id: &str,
-    ) -> Result<(), WorkerError> {
-        // No-op for backend adapter - assignment happens in dequeue
-        Ok(())
     }
 
     async fn mark_completed(
@@ -1670,7 +1670,7 @@ impl ActivityQueueTrait for BackendQueueAdapter {
         worker_id: &str,
     ) -> Result<(), WorkerError> {
         self.backend
-            .ack_success(activity.id, "", None, worker_id)
+            .ack_success(activity.id, None, worker_id)
             .await
             .map_err(Into::into)
     }
@@ -1692,7 +1692,7 @@ impl ActivityQueueTrait for BackendQueueAdapter {
             }
         };
         self.backend
-            .ack_failure(activity.id, "", failure, worker_id)
+            .ack_failure(activity.id, failure, worker_id)
             .await
             .map_err(Into::into)
     }

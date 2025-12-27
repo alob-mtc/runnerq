@@ -89,6 +89,7 @@ impl From<serde_json::Error> for StorageError {
 }
 
 // Conversion from Redis errors
+#[cfg(feature = "redis")]
 impl From<redis::RedisError> for StorageError {
     fn from(err: redis::RedisError) -> Self {
         StorageError::Unavailable(err.to_string())

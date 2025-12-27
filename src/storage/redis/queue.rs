@@ -380,10 +380,10 @@ pub async fn enqueue(backend: &RedisBackend, activity: QueuedActivity) -> Result
 
     // Handle scheduled activities
     if let Some(scheduled_at) = activity.scheduled_at {
-        let activity_json = serde_json::to_string(&activity)?;
+        let queue_entry = create_queue_entry(&activity);
         let scheduled_key = backend.scheduled_key();
         let score = scheduled_at.timestamp();
-        let _: () = conn.zadd(&scheduled_key, activity_json, score).await?;
+        let _: () = conn.zadd(&scheduled_key, queue_entry, score).await?;
 
         let mut snapshot = InternalSnapshot::from_queued(&activity);
         snapshot.status = ActivityStatus::Pending;
@@ -444,7 +444,7 @@ pub async fn dequeue(
     backend: &RedisBackend,
     worker_id: &str,
     timeout: Duration,
-) -> Result<Option<DequeuedActivity>, StorageError> {
+) -> Result<Option<QueuedActivity>, StorageError> {
     let mut conn = get_conn(backend).await?;
 
     let queue_key = backend.main_queue_key();
@@ -479,8 +479,6 @@ pub async fn dequeue(
         if let Some(queue_entry) = claimed {
             let activity = parse_queue_entry(&queue_entry)?;
             let lease_deadline_ms = (now_ms + lease_ms) as i64;
-            let lease_deadline =
-                DateTime::from_timestamp_millis(lease_deadline_ms).unwrap_or_else(Utc::now);
 
             let activity_key = RedisBackend::activity_key(&activity.id);
             let meta_fields = vec![
@@ -542,12 +540,7 @@ pub async fn dequeue(
                 "Activity claimed"
             );
 
-            return Ok(Some(DequeuedActivity {
-                activity,
-                lease_id: queue_entry,
-                attempt: snapshot.retry_count + 1,
-                lease_deadline,
-            }));
+            return Ok(Some(activity));
         }
 
         tokio::time::sleep(sleep_duration).await;
@@ -560,7 +553,6 @@ pub async fn dequeue(
 pub async fn ack_success(
     backend: &RedisBackend,
     activity_id: Uuid,
-    _lease_id: &str,
     result: Option<Value>,
     worker_id: &str,
 ) -> Result<(), StorageError> {
@@ -611,7 +603,6 @@ pub async fn ack_success(
 pub async fn ack_failure(
     backend: &RedisBackend,
     activity_id: Uuid,
-    _lease_id: &str,
     failure: FailureKind,
     worker_id: &str,
 ) -> Result<bool, StorageError> {
@@ -708,10 +699,10 @@ pub async fn ack_failure(
             created_at: snapshot.created_at,
         };
 
-        let activity_json = serde_json::to_string(&retry_activity)?;
+        let queue_entry = create_queue_entry(&retry_activity);
         let scheduled_key = backend.scheduled_key();
         let _: () = conn
-            .zadd(&scheduled_key, activity_json, scheduled_at.timestamp())
+            .zadd(&scheduled_key, queue_entry, scheduled_at.timestamp())
             .await?;
 
         info!(activity_id = %activity_id, retry_count = snapshot.retry_count, "Activity scheduled for retry");
@@ -762,32 +753,120 @@ pub async fn ack_failure(
     Ok(true)
 }
 
+/// Process scheduled activities whose scheduled time has arrived.
+///
+/// This atomically moves scheduled activities to the main queue using a Lua script,
+/// preventing duplicate processing in multi-node deployments and ensuring crash-proof operation.
+///
+/// The Lua script atomically:
+/// 1. Gets activities ready to run (score <= now)
+/// 2. For each activity, checks for duplicates in main queue
+/// 3. Atomically removes from scheduled set and adds to main queue with correct priority score
 pub async fn process_scheduled(backend: &RedisBackend) -> Result<u64, StorageError> {
     let mut conn = get_conn(backend).await?;
 
     let now_ts = Utc::now().timestamp();
     let scheduled_key = backend.scheduled_key();
+    let main_key = backend.main_queue_key();
 
-    let activity_jsons: Vec<String> = conn
-        .zrangebyscore_limit(&scheduled_key, 0, now_ts, 0, 100)
+    // Atomic Lua script to move scheduled activities to main queue
+    // This prevents race conditions in multi-node deployments
+    let lua = r#"
+    local now = tonumber(ARGV[1])
+    local limit = tonumber(ARGV[2])
+    local moved_entries = {}
+    local members = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, limit)
+
+    for _, m in ipairs(members) do
+        if redis.call('ZREM', KEYS[1], m) == 1 then
+            -- Check if member is already in main queue to prevent duplicates
+            local existing_score = redis.call('ZSCORE', KEYS[2], m)
+            if existing_score == false then
+                -- Member not in main queue, safe to move
+                -- Parse activity ID from the entry (format: "id:json")
+                local colon = string.find(m, ':', 1, true)
+                if colon then
+                    local id = string.sub(m, 1, colon - 1)
+                    local activity_key = 'activity:' .. id
+                    local score = redis.call('HGET', activity_key, 'score')
+                    if not score then
+                        -- Use current timestamp as fallback score
+                        score = now * 1000000  -- Convert to microseconds for priority ordering
+                    else
+                        score = tonumber(score)
+                        if not score then
+                            score = now * 1000000
+                        end
+                    end
+                    redis.call('ZADD', KEYS[2], score, m)
+                    table.insert(moved_entries, m)
+                else
+                    -- Fallback: use now as score if format is unexpected
+                    redis.call('ZADD', KEYS[2], now * 1000000, m)
+                    table.insert(moved_entries, m)
+                end
+            end
+        end
+    end
+    return moved_entries
+    "#;
+
+    let moved_entries: Vec<String> = redis::cmd("EVAL")
+        .arg(lua)
+        .arg(2)
+        .arg(&scheduled_key)
+        .arg(&main_key)
+        .arg(now_ts)
+        .arg(100i64)
+        .query_async(&mut *conn)
         .await?;
 
-    let mut count = 0u64;
-    for activity_json in activity_jsons {
-        let _: () = conn.zrem(&scheduled_key, &activity_json).await?;
+    // Parse moved activities and update snapshots/events
+    for queue_entry in &moved_entries {
+        if let Ok(activity) = parse_queue_entry(queue_entry) {
+            // Calculate correct priority score
+            let correct_score = calculate_priority_score(&activity.priority, activity.created_at);
 
-        match serde_json::from_str::<QueuedActivity>(&activity_json) {
-            Ok(mut activity) => {
-                activity.scheduled_at = None; // Clear scheduled_at for immediate processing
-                enqueue(backend, activity).await?;
-                count += 1;
+            // Check current score in queue and update if needed
+            let current_score: Option<f64> = conn.zscore(&main_key, queue_entry).await?;
+            if current_score
+                .map(|s| (s - correct_score).abs() > 0.001)
+                .unwrap_or(true)
+            {
+                // Score differs, update it
+                let _: () = conn.zadd(&main_key, queue_entry, correct_score).await?;
             }
-            Err(e) => {
-                error!(error = %e, "Failed to parse scheduled activity");
+
+            // Update snapshot status to Pending
+            if let Ok(Some(mut snapshot)) = load_snapshot(&mut conn, &activity.id).await {
+                let transition_at = now();
+                snapshot.status = ActivityStatus::Pending;
+                snapshot.status_updated_at = transition_at;
+                snapshot.current_worker_id = None;
+                snapshot.processing_member = None;
+                snapshot.lease_deadline_ms = None;
+                snapshot.score = Some(correct_score);
+                let _ = write_snapshot(&mut conn, backend, &snapshot).await;
+
+                // Record lifecycle event
+                let _ = record_event(
+                    &mut conn,
+                    backend,
+                    &activity.id,
+                    ActivityEventType::Enqueued,
+                    None,
+                    Some(json!({
+                        "priority": snapshot.priority,
+                        "scheduled_at": snapshot.scheduled_at,
+                        "from": "scheduled",
+                    })),
+                )
+                .await;
             }
         }
     }
 
+    let count = moved_entries.len() as u64;
     if count > 0 {
         info!(count = count, "Processed scheduled activities");
     }
