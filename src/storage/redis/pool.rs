@@ -1,16 +1,24 @@
-use crate::runner::error::WorkerError;
-use bb8_redis::bb8::{Pool, PooledConnection};
+//! Redis connection pool management.
+
+use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
 use std::time::Duration;
 use tokio::time::sleep;
 
-/// Configuration for Redis connection pool
+use crate::storage::StorageError;
+
+/// Configuration for Redis connection pool.
 #[derive(Debug, Clone, Copy)]
 pub struct RedisConfig {
+    /// Maximum number of connections in the pool
     pub max_size: u32,
+    /// Minimum number of idle connections
     pub min_idle: u32,
+    /// Connection timeout
     pub conn_timeout: Duration,
+    /// Idle connection timeout
     pub idle_timeout: Duration,
+    /// Maximum connection lifetime
     pub max_lifetime: Duration,
 }
 
@@ -26,18 +34,19 @@ impl Default for RedisConfig {
     }
 }
 
-/// Build a pool and verify it with a PING (with retry/backoff).
+/// Build a pool with default configuration and verify it with a PING.
+#[allow(dead_code)]
 pub async fn create_redis_pool(
     redis_url: &str,
-) -> Result<Pool<RedisConnectionManager>, WorkerError> {
+) -> Result<Pool<RedisConnectionManager>, StorageError> {
     create_redis_pool_with_config(redis_url, RedisConfig::default()).await
 }
 
-/// Build a pool with custom configuration and verify it with a PING (with retry/backoff).
+/// Build a pool with custom configuration and verify it with a PING.
 pub async fn create_redis_pool_with_config(
     redis_url: &str,
     config: RedisConfig,
-) -> Result<Pool<RedisConnectionManager>, WorkerError> {
+) -> Result<Pool<RedisConnectionManager>, StorageError> {
     tracing::info!(
         "Redis pool: max_size={}, min_idle={}, timeouts: conn={}s idle={}s life={}s",
         config.max_size,
@@ -48,7 +57,7 @@ pub async fn create_redis_pool_with_config(
     );
 
     let manager = RedisConnectionManager::new(redis_url).map_err(|e| {
-        WorkerError::RedisError(format!(
+        StorageError::Configuration(format!(
             "invalid redis url: {} - {}",
             redacted(redis_url),
             e
@@ -57,8 +66,9 @@ pub async fn create_redis_pool_with_config(
 
     let min_idle = config.min_idle.max(1).min(config.max_size);
     if config.max_size == 0 {
-        return Err(WorkerError::RedisError("max_size must be > 0".into()));
+        return Err(StorageError::Configuration("max_size must be > 0".into()));
     }
+
     let pool = Pool::builder()
         .max_size(config.max_size)
         .min_idle(Some(min_idle))
@@ -67,22 +77,20 @@ pub async fn create_redis_pool_with_config(
         .max_lifetime(Some(config.max_lifetime))
         .build(manager)
         .await
-        .map_err(|e| WorkerError::RedisError(format!("failed to build Redis pool: {}", e)))?;
+        .map_err(|e| StorageError::Unavailable(format!("failed to build Redis pool: {}", e)))?;
 
     // Warm/verify the pool once with retry + exponential backoff
     retry_async(3, Duration::from_millis(400), || async {
         let mut conn = pool
             .get()
             .await
-            .map_err(|e| WorkerError::RedisError(format!("get() from pool: {}", e)))?;
-        redis_ping(&mut conn)
-            .await
-            .map_err(|e| WorkerError::RedisError(format!("PING failed: {}", e)))?;
-        Ok::<_, WorkerError>(())
+            .map_err(|e| StorageError::Unavailable(format!("get() from pool: {}", e)))?;
+        redis_ping(&mut conn).await?;
+        Ok::<_, StorageError>(())
     })
     .await
     .map_err(|e| {
-        WorkerError::RedisError(format!(
+        StorageError::Unavailable(format!(
             "unable to verify Redis connectivity after retries: {}",
             e
         ))
@@ -91,50 +99,26 @@ pub async fn create_redis_pool_with_config(
     Ok(pool)
 }
 
-/// Get a healthy connection with retry/backoff (if you want to use it at call-sites).
-pub async fn get_redis_connection_with_retry<'a>(
-    pool: &'a Pool<RedisConnectionManager>,
-    max_retries: u32,
-) -> Result<PooledConnection<'a, RedisConnectionManager>, WorkerError> {
-    retry_async(max_retries, Duration::from_millis(300), || async {
-        let mut conn = pool
-            .get()
-            .await
-            .map_err(|e| WorkerError::RedisError(format!("get() from pool: {}", e)))?;
-        redis_ping(&mut conn)
-            .await
-            .map_err(|e| WorkerError::RedisError(format!("PING failed: {}", e)))?;
-        Ok::<_, WorkerError>(conn)
-    })
-    .await
-    .map_err(|e| {
-        WorkerError::RedisError(format!(
-            "failed to get Redis connection after retries: {}",
-            e
-        ))
-    })
-}
-
 /// Simple PING utility
 async fn redis_ping(
-    conn: &mut PooledConnection<'_, RedisConnectionManager>,
-) -> Result<(), WorkerError> {
+    conn: &mut bb8_redis::bb8::PooledConnection<'_, RedisConnectionManager>,
+) -> Result<(), StorageError> {
     let _: String = redis::cmd("PING")
         .query_async(&mut **conn)
         .await
-        .map_err(|e| WorkerError::RedisError(format!("Redis PING failed: {}", e)))?;
+        .map_err(|e| StorageError::Unavailable(format!("Redis PING failed: {}", e)))?;
     Ok(())
 }
 
-/// Generic async retry with exponential backoff (jitter optional).
+/// Generic async retry with exponential backoff.
 async fn retry_async<F, Fut, T>(
     max_retries: u32,
     base_delay: Duration,
     mut f: F,
-) -> Result<T, WorkerError>
+) -> Result<T, StorageError>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, WorkerError>>,
+    Fut: std::future::Future<Output = Result<T, StorageError>>,
 {
     let mut attempt = 0;
     loop {
@@ -158,7 +142,6 @@ where
 
 /// Redact credentials in logs
 fn redacted(url: &str) -> String {
-    // very light redaction for URIs like: redis://:password@host:6379/db
     if let Some(idx) = url.find('@') {
         let head = &url[..idx];
         if let Some(scheme_end) = head.find("://") {

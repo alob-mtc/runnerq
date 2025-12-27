@@ -349,7 +349,7 @@ pub trait ActivityHandler: Send + Sync {
     /// This string is used to match activities with their handlers when they are
     /// registered with the worker engine. It should be unique and descriptive.
     fn activity_type(&self) -> String;
-    
+
     /// Process the activity with the given payload and context.
     ///
     /// This method is called by the worker engine to execute the activity.

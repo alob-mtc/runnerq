@@ -11,8 +11,8 @@ use axum::{
 use futures::stream::{Stream, StreamExt};
 use serde::Deserialize;
 
-use crate::observability::inspector::{DeadLetterRecord, QueueInspector};
-use crate::queue::queue::{ActivityEvent, QueueStats};
+use crate::observability::inspector::QueueInspector;
+use crate::observability::models::{ActivityEvent, DeadLetterRecord, QueueStats};
 
 const CONSOLE_HTML: &str = include_str!("../../ui/runnerq-console.html");
 

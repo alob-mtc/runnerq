@@ -4,12 +4,14 @@ use crate::activity::activity::{
 };
 use crate::config::WorkerConfig;
 use crate::observability::QueueInspector;
-use crate::queue::queue::{ActivityQueue, ActivityQueueTrait, ActivityResult, ResultState};
+use crate::queue::queue::{ActivityQueueTrait, ActivityResult, ResultState};
 use crate::runner::error::WorkerError;
-use crate::runner::redis::{create_redis_pool, create_redis_pool_with_config, RedisConfig};
-use crate::{ActivityContext, ActivityError};
+use crate::storage::redis::RedisConfig;
+use crate::storage::{FailureKind, IdempotencyBehavior, QueuedActivity, Storage};
+use crate::{ActivityContext, ActivityError, RedisBackend};
 use bb8_redis::bb8::Pool;
 use bb8_redis::RedisConnectionManager;
+use chrono::Utc;
 use futures::FutureExt;
 use serde_json::json;
 use std::panic::AssertUnwindSafe;
@@ -126,7 +128,7 @@ impl Backoff {
 
 pub struct WorkerEngine {
     activity_queue: Arc<dyn ActivityQueueTrait>,
-    queue_core: Arc<ActivityQueue>,
+    backend: Arc<dyn Storage>,
     activity_handlers: ActivityHandlerRegistry, // kept as-is per request
     config: WorkerConfig,
     running: Arc<RwLock<bool>>, // retains external visibility
@@ -200,15 +202,37 @@ impl WorkerEngine {
     /// ```
     pub fn new(redis_pool: Pool<RedisConnectionManager>, config: WorkerConfig) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-        let queue = Arc::new(ActivityQueue::new(
-            redis_pool,
-            config.queue_name.clone(),
-            config.lease_ms.unwrap_or(100),
-        ));
-        let activity_queue: Arc<dyn ActivityQueueTrait> = queue.clone();
+        let backend: Arc<dyn Storage> = Arc::new(
+            RedisBackend::new(redis_pool, config.queue_name.clone())
+                .with_lease_ms(config.lease_ms.unwrap_or(60_000)),
+        );
+        let adapter = Arc::new(BackendQueueAdapter::new(backend.clone()));
         Self {
-            activity_queue,
-            queue_core: queue,
+            activity_queue: adapter,
+            backend,
+            activity_handlers: ActivityHandlerRegistry::new(),
+            config,
+            running: Arc::new(RwLock::new(false)),
+            shutdown_tx,
+            cancel_token: CancellationToken::new(),
+            metrics: Arc::new(NoopMetrics),
+        }
+    }
+
+    /// Creates a new WorkerEngine with a custom backend implementation.
+    ///
+    /// This allows using alternative backends like Valkey, Kafka, or SQL-based implementations.
+    ///
+    /// # Parameters
+    ///
+    /// * `backend` - Custom backend implementing the [`Storage`] trait
+    /// * `config` - Configuration settings for the worker engine
+    pub fn new_with_backend(backend: Arc<dyn Storage>, config: WorkerConfig) -> Self {
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let adapter = Arc::new(BackendQueueAdapter::new(backend.clone()));
+        Self {
+            activity_queue: adapter,
+            backend,
             activity_handlers: ActivityHandlerRegistry::new(),
             config,
             running: Arc::new(RwLock::new(false)),
@@ -222,12 +246,13 @@ impl WorkerEngine {
         self.metrics = sink;
     }
 
+    /// Returns a `QueueInspector` for observability operations.
+    ///
+    /// The inspector uses the backend's inspection capabilities for
+    /// reading queue state and activity information.
     pub fn inspector(&self) -> QueueInspector {
-        QueueInspector::new(
-            self.queue_core.redis_pool(),
-            self.queue_core.queue_name().to_string(),
-        )
-        .with_max_workers(self.config.max_concurrent_activities)
+        QueueInspector::from_backend(self.backend.clone())
+            .with_max_workers(self.config.max_concurrent_activities)
     }
 
     /// Creates a new WorkerEngineBuilder for fluent configuration.
@@ -508,7 +533,7 @@ impl WorkerEngine {
                 };
 
                 // Dequeue with cooperative shutdown
-                let dequeue_fut = activity_queue.dequeue(Duration::from_secs(1));
+                let dequeue_fut = activity_queue.dequeue(Duration::from_secs(1), &worker_label);
                 let activity_opt = tokio::select! {
                     _ = shutdown_rx.changed() => { drop(permit); break; }
                     res = dequeue_fut => res
@@ -564,7 +589,7 @@ impl WorkerEngine {
                                 activity,
                                 "handler_not_found".to_string(),
                                 false,
-                                Some(worker_label.as_str()),
+                                worker_label.as_str(),
                             )
                             .await
                         {
@@ -618,7 +643,7 @@ impl WorkerEngine {
                     Ok(Ok(value)) => {
                         metrics.inc_counter("activity_completed", 1);
                         if let Err(e) = activity_queue
-                            .mark_completed(&activity, Some(worker_label.as_str()))
+                            .mark_completed(&activity, worker_label.as_str())
                             .await
                         {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as completed");
@@ -641,7 +666,7 @@ impl WorkerEngine {
                         metrics.inc_counter("activity_retry", 1);
                         warn!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity requesting retry");
                         match activity_queue
-                            .mark_failed(activity, reason.clone(), true, Some(worker_label.as_str()))
+                            .mark_failed(activity, reason.clone(), true, worker_label.as_str())
                             .await
                         {
                             Ok(true) => {
@@ -656,7 +681,13 @@ impl WorkerEngine {
                                         activity_queue_for_context.clone(),
                                     )),
                                 };
-                                handler.on_dead_letter(payload_for_dead_letter.clone(), dead_letter_context, reason).await;
+                                handler
+                                    .on_dead_letter(
+                                        payload_for_dead_letter.clone(),
+                                        dead_letter_context,
+                                        reason,
+                                    )
+                                    .await;
                             }
                             Ok(false) => {
                                 // Activity was retried or failed, no callback needed
@@ -670,12 +701,7 @@ impl WorkerEngine {
                         metrics.inc_counter("activity_failed_non_retry", 1);
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, reason = %reason, "Activity failed");
                         if let Err(e) = activity_queue
-                            .mark_failed(
-                                activity,
-                                reason.clone(),
-                                false,
-                                Some(worker_label.as_str()),
-                            )
+                            .mark_failed(activity, reason.clone(), false, worker_label.as_str())
                             .await
                         {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
@@ -700,7 +726,7 @@ impl WorkerEngine {
                         let error_msg = "Activity execution timed out".to_string();
                         error!(%worker_id, activity_id = %activity_id, activity_type = ?activity_type, timeout = ?activity_timeout, "Activity timed out");
                         match activity_queue
-                            .mark_failed(activity, error_msg.clone(), true, Some(worker_label.as_str()))
+                            .mark_failed(activity, error_msg.clone(), true, worker_label.as_str())
                             .await
                         {
                             Ok(true) => {
@@ -715,7 +741,13 @@ impl WorkerEngine {
                                         activity_queue_for_context.clone(),
                                     )),
                                 };
-                                handler.on_dead_letter(payload_for_dead_letter.clone(), dead_letter_context, error_msg).await;
+                                handler
+                                    .on_dead_letter(
+                                        payload_for_dead_letter.clone(),
+                                        dead_letter_context,
+                                        error_msg,
+                                    )
+                                    .await;
                             }
                             Ok(false) => {
                                 // Activity was retried, no callback needed
@@ -1012,6 +1044,7 @@ pub struct WorkerEngineBuilder {
     schedule_poll_interval: Option<Duration>,
     redis_config: Option<RedisConfig>,
     metrics: Option<Arc<dyn MetricsSink>>,
+    backend: Option<Arc<dyn Storage>>,
 }
 
 impl WorkerEngineBuilder {
@@ -1024,6 +1057,7 @@ impl WorkerEngineBuilder {
             schedule_poll_interval: None,
             redis_config: None,
             metrics: None,
+            backend: None,
         }
     }
 
@@ -1087,6 +1121,39 @@ impl WorkerEngineBuilder {
         self
     }
 
+    /// Sets a custom backend implementation.
+    ///
+    /// When a custom backend is provided, the `redis_url` and `redis_config` options
+    /// are ignored. The backend is used directly for all queue operations.
+    ///
+    /// # Parameters
+    ///
+    /// * `backend` - Custom backend implementation
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use runner_q::{WorkerEngine, storage::{Backend, RedisBackend}};
+    /// use std::sync::Arc;
+    ///
+    /// // Create a custom backend
+    /// let backend = RedisBackend::builder()
+    ///     .redis_url("redis://localhost:6379")
+    ///     .queue_name("my_app")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let engine = WorkerEngine::builder()
+    ///     .backend(Arc::new(backend))
+    ///     .max_workers(8)
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn backend(mut self, backend: Arc<dyn Storage>) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
     /// Builds the WorkerEngine with the configured settings.
     ///
     /// # Returns
@@ -1098,15 +1165,39 @@ impl WorkerEngineBuilder {
     ///
     /// Returns `WorkerError` if Redis connection cannot be established.
     pub async fn build(self) -> Result<WorkerEngine, WorkerError> {
+        let max_concurrent_activities = self.max_workers.unwrap_or(10);
+        let schedule_poll_interval_seconds = self.schedule_poll_interval.map_or(5, |d| d.as_secs());
+
+        // If a custom backend is provided, use it
+        if let Some(backend) = self.backend {
+            let queue_name = self.queue_name.unwrap_or_else(|| "default".to_string());
+            let config = WorkerConfig {
+                queue_name,
+                max_concurrent_activities,
+                redis_url: "custom-backend".to_string(), // Placeholder, not used
+                schedule_poll_interval_seconds: Some(schedule_poll_interval_seconds),
+                lease_ms: Some(60_000),
+                reaper_interval_seconds: Some(5),
+                reaper_batch_size: Some(100),
+            };
+
+            let mut worker_engine = WorkerEngine::new_with_backend(backend, config);
+
+            if let Some(metrics) = self.metrics {
+                worker_engine.with_metrics(metrics);
+            }
+
+            return Ok(worker_engine);
+        }
+
+        // Default: use Redis backend
         let redis_url = self
             .redis_url
             .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
         let queue_name = self.queue_name.unwrap_or_else(|| "default".to_string());
-        let max_concurrent_activities = self.max_workers.unwrap_or(10);
-        let schedule_poll_interval_seconds = self.schedule_poll_interval.map_or(5, |d| d.as_secs());
 
         let config = WorkerConfig {
-            queue_name,
+            queue_name: queue_name.clone(),
             max_concurrent_activities,
             redis_url: redis_url.clone(),
             schedule_poll_interval_seconds: Some(schedule_poll_interval_seconds),
@@ -1115,13 +1206,12 @@ impl WorkerEngineBuilder {
             reaper_batch_size: Some(100),
         };
 
-        let redis_pool = if let Some(redis_config) = self.redis_config {
-            create_redis_pool_with_config(&config.redis_url, redis_config).await?
-        } else {
-            create_redis_pool(&config.redis_url).await?
-        };
-
-        let mut worker_engine = WorkerEngine::new(redis_pool, config);
+        let backend = RedisBackend::builder()
+            .redis_url(&redis_url)
+            .queue_name(queue_name)
+            .build()
+            .await?;
+        let mut worker_engine = WorkerEngine::new_with_backend(Arc::new(backend), config);
 
         // Apply custom metrics if provided
         if let Some(metrics) = self.metrics {
@@ -1470,5 +1560,217 @@ impl ActivityExecutor for WorkerEngineWrapper {
     /// ```
     fn activity(&self, activity_type: &str) -> ActivityBuilder<'_> {
         ActivityBuilder::new(self, activity_type.to_string())
+    }
+}
+
+// ============================================================================
+// BackendQueueAdapter - Bridges Backend trait to ActivityQueueTrait
+// ============================================================================
+
+/// Adapter that wraps a [`Storage`] implementation to provide [`ActivityQueueTrait`] interface.
+///
+/// This allows the existing `WorkerEngine` internals to work with custom backends
+/// without requiring changes to the core processing logic.
+struct BackendQueueAdapter {
+    backend: Arc<dyn Storage>,
+}
+
+impl BackendQueueAdapter {
+    fn new(backend: Arc<dyn Storage>) -> Self {
+        Self { backend }
+    }
+
+    fn activity_to_queued(activity: &Activity) -> QueuedActivity {
+        QueuedActivity {
+            id: activity.id,
+            activity_type: activity.activity_type.clone(),
+            payload: activity.payload.clone(),
+            priority: activity.priority.clone(),
+            max_retries: activity.max_retries,
+            retry_count: activity.retry_count,
+            timeout_seconds: activity.timeout_seconds,
+            retry_delay_seconds: activity.retry_delay_seconds,
+            scheduled_at: activity.scheduled_at,
+            metadata: activity.metadata.clone(),
+            idempotency_key: activity.idempotency_key.as_ref().map(|(k, b)| {
+                let behavior = match b {
+                    OnDuplicate::AllowReuse => IdempotencyBehavior::AllowReuse,
+                    OnDuplicate::ReturnExisting => IdempotencyBehavior::ReturnExisting,
+                    OnDuplicate::AllowReuseOnFailure => IdempotencyBehavior::AllowReuseOnFailure,
+                    OnDuplicate::NoReuse => IdempotencyBehavior::NoReuse,
+                };
+                (k.clone(), behavior)
+            }),
+            created_at: activity.created_at,
+        }
+    }
+
+    fn queued_to_activity(queued: &QueuedActivity) -> Activity {
+        Activity {
+            id: queued.id,
+            activity_type: queued.activity_type.clone(),
+            payload: queued.payload.clone(),
+            priority: queued.priority.clone(),
+            status: crate::ActivityStatus::Pending,
+            created_at: queued.created_at,
+            scheduled_at: queued.scheduled_at,
+            retry_count: queued.retry_count,
+            max_retries: queued.max_retries,
+            timeout_seconds: queued.timeout_seconds,
+            retry_delay_seconds: queued.retry_delay_seconds,
+            metadata: queued.metadata.clone(),
+            idempotency_key: queued.idempotency_key.as_ref().map(|(k, b)| {
+                let behavior = match b {
+                    IdempotencyBehavior::AllowReuse => OnDuplicate::AllowReuse,
+                    IdempotencyBehavior::ReturnExisting => OnDuplicate::ReturnExisting,
+                    IdempotencyBehavior::AllowReuseOnFailure => OnDuplicate::AllowReuseOnFailure,
+                    IdempotencyBehavior::NoReuse => OnDuplicate::NoReuse,
+                };
+                (k.clone(), behavior)
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ActivityQueueTrait for BackendQueueAdapter {
+    async fn enqueue(&self, activity: Activity) -> Result<(), WorkerError> {
+        let queued = Self::activity_to_queued(&activity);
+        self.backend.enqueue(queued).await.map_err(Into::into)
+    }
+
+    async fn dequeue(
+        &self,
+        timeout: Duration,
+        worker_id: &str,
+    ) -> Result<Option<Activity>, WorkerError> {
+        match self.backend.dequeue(worker_id, timeout).await? {
+            Some(dequeued) => {
+                let mut activity = Self::queued_to_activity(&dequeued.activity);
+                activity.status = crate::ActivityStatus::Running;
+                activity.retry_count = dequeued.attempt.saturating_sub(1);
+                Ok(Some(activity))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn assign_worker(
+        &self,
+        _activity_id: uuid::Uuid,
+        _worker_id: &str,
+    ) -> Result<(), WorkerError> {
+        // No-op for backend adapter - assignment happens in dequeue
+        Ok(())
+    }
+
+    async fn mark_completed(
+        &self,
+        activity: &Activity,
+        worker_id: &str,
+    ) -> Result<(), WorkerError> {
+        self.backend
+            .ack_success(activity.id, "", None, worker_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn mark_failed(
+        &self,
+        activity: Activity,
+        error_message: String,
+        retryable: bool,
+        worker_id: &str,
+    ) -> Result<bool, WorkerError> {
+        let failure = if retryable {
+            FailureKind::Retryable {
+                reason: error_message,
+            }
+        } else {
+            FailureKind::NonRetryable {
+                reason: error_message,
+            }
+        };
+        self.backend
+            .ack_failure(activity.id, "", failure, worker_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn schedule_activity(&self, activity: Activity) -> Result<(), WorkerError> {
+        let mut queued = Self::activity_to_queued(&activity);
+        if queued.scheduled_at.is_none() {
+            queued.scheduled_at = Some(Utc::now());
+        }
+        self.backend.enqueue(queued).await.map_err(Into::into)
+    }
+
+    async fn process_scheduled_activities(&self) -> Result<Vec<Activity>, WorkerError> {
+        let _count = self.backend.process_scheduled().await?;
+        // Return empty vec - activities are moved to main queue internally
+        Ok(vec![])
+    }
+
+    async fn requeue_expired(&self, max_to_process: usize) -> Result<u64, WorkerError> {
+        self.backend
+            .requeue_expired(max_to_process)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn evaluate_idempotency_rule(
+        &self,
+        activity: &Activity,
+    ) -> Result<Option<uuid::Uuid>, WorkerError> {
+        let queued = Self::activity_to_queued(activity);
+        self.backend
+            .check_idempotency(&queued)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn extend_lease(
+        &self,
+        activity_id: uuid::Uuid,
+        extend_by: Duration,
+    ) -> Result<bool, WorkerError> {
+        self.backend
+            .extend_lease(activity_id, extend_by)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn store_result(
+        &self,
+        activity_id: uuid::Uuid,
+        result: ActivityResult,
+    ) -> Result<(), WorkerError> {
+        let backend_result = crate::storage::ActivityResult {
+            data: result.data,
+            state: match result.state {
+                ResultState::Ok => crate::storage::ResultState::Ok,
+                ResultState::Err => crate::storage::ResultState::Err,
+            },
+        };
+        self.backend
+            .store_result(activity_id, backend_result)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn get_result(
+        &self,
+        activity_id: uuid::Uuid,
+    ) -> Result<Option<ActivityResult>, WorkerError> {
+        match self.backend.get_result(activity_id).await? {
+            Some(backend_result) => Ok(Some(ActivityResult {
+                data: backend_result.data,
+                state: match backend_result.state {
+                    crate::storage::ResultState::Ok => ResultState::Ok,
+                    crate::storage::ResultState::Err => ResultState::Err,
+                },
+            })),
+            None => Ok(None),
+        }
     }
 }

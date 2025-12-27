@@ -13,7 +13,8 @@ A robust, scalable Redis-based activity queue and worker system for Rust applica
 - **Activity orchestration** - Activities can execute other activities for complex workflows
 - **Comprehensive error handling** - Retryable and non-retryable error types
 - **Activity metadata** - Support for custom metadata on activities
-- **Redis persistence** - Activities are stored in Redis for durability
+- **Pluggable backend system** - Trait-based abstraction allows custom backends (Redis, Valkey, Kafka, SQL, etc.)
+- **Redis/Valkey persistence** - Default backend with full Redis and Valkey compatibility
 - **Built-in observability console** - Real-time web UI for monitoring and managing activities
 - **Queue statistics** - Monitoring capabilities and metrics collection
 
@@ -199,6 +200,21 @@ let engine = WorkerEngine::builder()
     .max_workers(8)
     .redis_config(redis_config)
     .metrics(Arc::new(PrometheusMetrics))
+    .build()
+    .await?;
+
+// Using a custom backend
+use runner_q::RedisBackend;
+
+let backend = RedisBackend::builder()
+    .redis_url("redis://localhost:6379")
+    .queue_name("my_app")
+    .build()
+    .await?;
+
+let engine = WorkerEngine::builder()
+    .backend(Arc::new(backend))
+    .max_workers(8)
     .build()
     .await?;
 ```
@@ -624,6 +640,191 @@ let engine = WorkerEngine::builder()
     .build()
     .await?;
 ```
+
+### Custom Backend Support
+
+Runner-Q uses a trait-based backend abstraction that allows you to swap out the persistence layer. The default Redis backend works with both Redis and Valkey (Redis-compatible).
+
+#### Architecture
+
+```mermaid
+graph TD
+    subgraph PublicAPI [Public API]
+        WEB[WorkerEngineBuilder]
+        WE[WorkerEngine]
+    end
+    
+    subgraph BackendTrait [New Backend Module]
+        QB[QueueStorage trait]
+        IB[InspectionStorage trait]
+    end
+    
+    subgraph Implementations [Backend Implementations]
+        RB[RedisBackend]
+        Future[Future: ValkeyBackend, KafkaBackend, etc.]
+    end
+    
+    WEB -->|".backend()"| QB
+    WEB -->|".redis_url()"| RB
+    WE --> QB
+    WE --> IB
+    RB --> QB
+    RB --> IB
+    Future -.-> QB
+    Future -.-> IB
+```
+
+The public API remains unchanged - you can continue using `.redis_url()` for the default experience, or use `.backend()` to inject a custom implementation.
+
+#### Using the Default Redis Backend
+
+```rust
+use runner_q::{WorkerEngine, RedisBackend};
+use std::sync::Arc;
+
+// Option 1: Use the simple redis_url API (recommended for most cases)
+let engine = WorkerEngine::builder()
+    .redis_url("redis://localhost:6379")
+    .queue_name("my_app")
+    .build()
+    .await?;
+
+// Option 2: Create a RedisBackend explicitly for more control
+let backend = RedisBackend::builder()
+    .redis_url("redis://localhost:6379")
+    .queue_name("my_app")
+    .lease_ms(60_000)  // Custom lease duration
+    .build()
+    .await?;
+
+let engine = WorkerEngine::builder()
+    .backend(Arc::new(backend))
+    .max_workers(8)
+    .build()
+    .await?;
+```
+
+#### Valkey Compatibility
+
+Since Valkey is Redis protocol-compatible, you can use it directly by pointing the URL to your Valkey server:
+
+```rust
+let engine = WorkerEngine::builder()
+    .redis_url("redis://valkey-server:6379")  // Works with Valkey!
+    .queue_name("my_app")
+    .build()
+    .await?;
+```
+
+#### Implementing a Custom Backend
+
+You can implement your own backend by implementing the `Backend` trait (which combines `QueueStorage` and `InspectionStorage`):
+
+```rust
+use runner_q::storage::{
+    Backend, QueueStorage, InspectionStorage, StorageError,
+    QueuedActivity, DequeuedActivity, FailureKind, ActivityResult,
+    QueueStats, ActivitySnapshot, ActivityEvent, DeadLetterRecord,
+};
+use async_trait::async_trait;
+use std::time::Duration;
+use uuid::Uuid;
+
+pub struct MyCustomBackend {
+    // Your backend state (connection pool, config, etc.)
+}
+
+#[async_trait]
+impl QueueStorage for MyCustomBackend {
+    async fn enqueue(&self, activity: QueuedActivity) -> Result<(), StorageError> {
+        // Implement activity enqueuing
+        todo!()
+    }
+
+    async fn dequeue(
+        &self,
+        worker_id: &str,
+        timeout: Duration,
+    ) -> Result<Option<DequeuedActivity>, StorageError> {
+        // Implement activity claiming
+        todo!()
+    }
+
+    async fn ack_success(
+        &self,
+        activity_id: Uuid,
+        lease_id: &str,
+        result: Option<serde_json::Value>,
+        worker_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        // Mark activity as completed
+        todo!()
+    }
+
+    async fn ack_failure(
+        &self,
+        activity_id: Uuid,
+        lease_id: &str,
+        failure: FailureKind,
+        worker_id: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        // Handle activity failure (retry or dead-letter)
+        todo!()
+    }
+
+    // ... implement other required methods
+}
+
+#[async_trait]
+impl InspectionStorage for MyCustomBackend {
+    async fn stats(&self) -> Result<QueueStats, StorageError> {
+        // Return queue statistics
+        todo!()
+    }
+
+    async fn list_pending(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ActivitySnapshot>, StorageError> {
+        // List pending activities
+        todo!()
+    }
+
+    // ... implement other required methods
+}
+
+// Use your custom backend
+let backend = Arc::new(MyCustomBackend { /* ... */ });
+let engine = WorkerEngine::builder()
+    .backend(backend)
+    .max_workers(8)
+    .build()
+    .await?;
+```
+
+#### Backend Trait Reference
+
+The backend abstraction consists of two traits:
+
+**`QueueStorage`** - Core queue operations:
+- `enqueue()` - Add activity to the queue
+- `dequeue()` - Claim an activity for processing
+- `ack_success()` - Mark activity as completed
+- `ack_failure()` - Handle activity failure (retry or dead-letter)
+- `process_scheduled()` - Move due scheduled activities to ready queue
+- `requeue_expired()` - Reclaim activities with expired leases
+- `extend_lease()` - Extend activity processing lease
+- `store_result()` / `get_result()` - Activity result storage
+- `check_idempotency()` - Idempotency key handling
+
+**`InspectionStorage`** - Observability operations:
+- `stats()` - Get queue statistics
+- `list_pending()` / `list_processing()` / `list_scheduled()` / `list_completed()` - List activities by status
+- `list_dead_letter()` - List dead-lettered activities
+- `get_activity()` - Get specific activity details
+- `get_activity_events()` - Get activity lifecycle events
+- `event_stream()` - Stream real-time events (for SSE)
 
 ### Graceful Shutdown
 

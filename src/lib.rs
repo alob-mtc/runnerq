@@ -203,15 +203,15 @@ pub mod config;
 pub mod observability;
 pub mod queue;
 pub mod runner;
+pub mod storage;
 
 // Re-export main types for easy access
 pub use crate::config::WorkerConfig;
-pub use crate::observability::{observability_api, runnerq_ui, DeadLetterRecord, QueueInspector};
-pub use crate::queue::queue::{
-    ActivityEvent, ActivityEventType, ActivityQueue, ActivitySnapshot, QueueStats,
+pub use crate::observability::{
+    observability_api, runnerq_ui, ActivityEvent, ActivityEventType, ActivitySnapshot,
+    DeadLetterRecord, QueueInspector, QueueStats,
 };
 pub use crate::runner::error::WorkerError;
-pub use crate::runner::redis::RedisConfig;
 pub use crate::runner::runner::{
     ActivityBuilder, ActivityExecutor, MetricsSink, WorkerEngine, WorkerEngineBuilder,
 };
@@ -220,3 +220,8 @@ pub use activity::activity::{
     ActivityStatus, OnDuplicate,
 };
 pub use activity::error::{ActivityError, RetryableError};
+
+// Re-export backend types for custom backend implementations
+pub use crate::storage::{
+    redis::RedisConfig, InspectionStorage, QueueStorage, RedisBackend, Storage, StorageError,
+};

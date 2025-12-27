@@ -1,3 +1,4 @@
+use crate::storage::StorageError;
 use redis::RedisError;
 use thiserror::Error;
 
@@ -52,6 +53,22 @@ pub enum WorkerError {
 impl From<RedisError> for WorkerError {
     fn from(err: RedisError) -> Self {
         WorkerError::RedisError(err.to_string())
+    }
+}
+
+impl From<StorageError> for WorkerError {
+    fn from(err: StorageError) -> Self {
+        match err {
+            StorageError::Unavailable(msg) => WorkerError::RedisError(msg),
+            StorageError::Conflict(msg) => WorkerError::QueueError(msg),
+            StorageError::NotFound(msg) => WorkerError::QueueError(msg),
+            StorageError::Internal(msg) => WorkerError::QueueError(msg),
+            StorageError::Serialization(msg) => WorkerError::QueueError(msg),
+            StorageError::Configuration(msg) => WorkerError::ConfigError(msg),
+            StorageError::Timeout(msg) => WorkerError::ExecutionError(msg),
+            StorageError::DuplicateActivity(msg) => WorkerError::DuplicateActivity(msg),
+            StorageError::IdempotencyConflict(msg) => WorkerError::IdempotencyConflict(msg),
+        }
     }
 }
 
