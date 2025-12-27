@@ -19,7 +19,7 @@
 
 mod html;
 
-#[cfg(feature = "axum-ui")]
+#[cfg(all(feature = "axum-ui", any(feature = "redis", feature = "postgres")))]
 mod axum;
 
 // Re-export HTML for custom integrations
