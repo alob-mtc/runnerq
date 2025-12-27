@@ -213,6 +213,17 @@ impl Default for RedisBackendBuilder {
 }
 
 // ============================================================================
+// ResultStorage Implementation
+// ============================================================================
+
+#[async_trait]
+impl ResultStorage for RedisBackend {
+    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError> {
+        queue::get_result(self, activity_id).await
+    }
+}
+
+// ============================================================================
 // QueueStorage Implementation
 // ============================================================================
 
@@ -270,10 +281,6 @@ impl QueueStorage for RedisBackend {
         result: ActivityResult,
     ) -> Result<(), StorageError> {
         queue::store_result(self, activity_id, result).await
-    }
-
-    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError> {
-        queue::get_result(self, activity_id).await
     }
 
     async fn check_idempotency(

@@ -32,23 +32,22 @@ struct Pagination {
 /// # Example
 ///
 /// ```rust,no_run
-/// use runner_q::{WorkerConfig, QueueInspector};
-/// use runner_q::observability::runnerq_ui;
+/// use std::sync::Arc;
+/// use runner_q::{WorkerEngineBuilder, QueueInspector};
+/// use runner_q::observability::{runnerq_ui, observability_api};
 /// use axum::Router;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// let cfg = WorkerConfig {
-///     queue_name: "my_app".to_string(),
-///     max_concurrent_activities: 10,
-///     redis_url: "redis://127.0.0.1:6379".to_string(),
-///     schedule_poll_interval_seconds: Some(5),
-///     lease_ms: Some(60_000),
-///     reaper_interval_seconds: Some(5),
-///     reaper_batch_size: Some(100),
-/// };
+/// // Build the worker engine (e.g., with Redis)
+/// let engine = WorkerEngineBuilder::new()
+///     .redis_url("redis://127.0.0.1:6379")
+///     .queue_name("my_app")
+///     .max_concurrent_activities(10)
+///     .build()
+///     .await?;
 ///
-/// let pool = runner_q::runner::redis::create_redis_pool(&cfg.redis_url).await?;
-/// let inspector = QueueInspector::new(pool, cfg.queue_name.clone());
+/// // Create inspector from the engine's backend
+/// let inspector = engine.inspector().expect("Backend supports inspection");
 ///
 /// let app = Router::new()
 ///     .nest("/console", runnerq_ui(inspector.clone()))
@@ -87,23 +86,22 @@ pub fn runnerq_ui(inspector: QueueInspector) -> Router {
 /// # Example
 ///
 /// ```rust,no_run
-/// use runner_q::{WorkerConfig, QueueInspector};
+/// use std::sync::Arc;
+/// use runner_q::{WorkerEngineBuilder, QueueInspector};
 /// use runner_q::observability::observability_api;
 /// use axum::Router;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// let cfg = WorkerConfig {
-///     queue_name: "my_app".to_string(),
-///     max_concurrent_activities: 10,
-///     redis_url: "redis://127.0.0.1:6379".to_string(),
-///     schedule_poll_interval_seconds: Some(5),
-///     lease_ms: Some(60_000),
-///     reaper_interval_seconds: Some(5),
-///     reaper_batch_size: Some(100),
-/// };
+/// // Build the worker engine (e.g., with Postgres)
+/// let engine = WorkerEngineBuilder::new()
+///     .postgres_url("postgres://user:pass@localhost/db")
+///     .queue_name("my_app")
+///     .max_concurrent_activities(10)
+///     .build()
+///     .await?;
 ///
-/// let pool = runner_q::runner::redis::create_redis_pool(&cfg.redis_url).await?;
-/// let inspector = QueueInspector::new(pool, cfg.queue_name.clone());
+/// // Create inspector from the engine's backend
+/// let inspector = engine.inspector().expect("Backend supports inspection");
 ///
 /// let app = Router::new()
 ///     .nest("/api/observability", observability_api(inspector));

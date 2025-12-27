@@ -75,6 +75,7 @@ pub use traits::{
     QueueStorage,
     QueuedActivity,
     ResultState,
+    ResultStorage,
     // Traits
     Storage,
 };

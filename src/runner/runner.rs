@@ -9,7 +9,7 @@ use crate::storage::{FailureKind, IdempotencyBehavior, QueuedActivity, Storage};
 use crate::{ActivityContext, ActivityError};
 use chrono::Utc;
 
-#[cfg(feature = "redis")]
+#[cfg(any(feature = "redis", feature = "postgres"))]
 use crate::observability::QueueInspector;
 #[cfg(feature = "redis")]
 use crate::storage::redis::RedisConfig;
@@ -257,9 +257,9 @@ impl WorkerEngine {
     ///
     /// The inspector uses the backend's inspection capabilities for
     /// reading queue state and activity information.
-    #[cfg(feature = "redis")]
+    #[cfg(any(feature = "redis", feature = "postgres"))]
     pub fn inspector(&self) -> QueueInspector {
-        QueueInspector::from_backend(self.backend.clone())
+        QueueInspector::new(self.backend.clone())
             .with_max_workers(self.config.max_concurrent_activities)
     }
 

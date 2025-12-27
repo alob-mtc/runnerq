@@ -70,7 +70,7 @@ use crate::activity::activity::{ActivityPriority, ActivityStatus};
 use crate::observability::{ActivityEvent, ActivityEventType, ActivitySnapshot, DeadLetterRecord};
 use crate::storage::{
     ActivityResult, FailureKind, IdempotencyBehavior, InspectionStorage, QueueStats, QueueStorage,
-    QueuedActivity, ResultState, StorageError,
+    QueuedActivity, ResultState, ResultStorage, StorageError,
 };
 
 // ============================================================================
@@ -304,6 +304,35 @@ impl PostgresBackend {
             1 => ActivityPriority::Normal,
             _ => ActivityPriority::Low,
         }
+    }
+
+    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError> {
+        let row: Option<(String, Option<Value>)> =
+            sqlx::query_as(r#"SELECT state, data FROM runnerq_results WHERE activity_id = $1"#)
+                .bind(activity_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| StorageError::Internal(format!("Failed to get result: {}", e)))?;
+
+        Ok(row.map(|(state, data)| ActivityResult {
+            data,
+            state: if state == "Ok" {
+                ResultState::Ok
+            } else {
+                ResultState::Err
+            },
+        }))
+    }
+}
+
+// ============================================================================
+// ResultStorage Implementation
+// ============================================================================
+
+#[async_trait]
+impl ResultStorage for PostgresBackend {
+    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError> {
+        PostgresBackend::get_result(self, activity_id).await
     }
 }
 
@@ -817,24 +846,6 @@ impl QueueStorage for PostgresBackend {
         .map_err(|e| StorageError::Internal(format!("Failed to store result: {}", e)))?;
 
         Ok(())
-    }
-
-    async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError> {
-        let row: Option<(String, Option<Value>)> =
-            sqlx::query_as(r#"SELECT state, data FROM runnerq_results WHERE activity_id = $1"#)
-                .bind(activity_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| StorageError::Internal(format!("Failed to get result: {}", e)))?;
-
-        Ok(row.map(|(state, data)| ActivityResult {
-            data,
-            state: if state == "Ok" {
-                ResultState::Ok
-            } else {
-                ResultState::Err
-            },
-        }))
     }
 
     async fn check_idempotency(
