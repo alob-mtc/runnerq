@@ -1,9 +1,10 @@
 # Runner-Q
 
-A robust, scalable Redis-based activity queue and worker system for Rust applications.
+A robust, scalable activity queue and worker system for Rust applications with pluggable storage backends.
 
 ## Features
 
+- **Pluggable backend system** - Trait-based storage abstraction supporting Redis, PostgreSQL, Valkey, and custom backends
 - **Priority-based activity processing** - Support for Critical, High, Normal, and Low priority levels
 - **Activity scheduling** - Precise timestamp-based scheduling for future execution
 - **Intelligent retry mechanism** - Built-in retry mechanism with exponential backoff
@@ -13,10 +14,17 @@ A robust, scalable Redis-based activity queue and worker system for Rust applica
 - **Activity orchestration** - Activities can execute other activities for complex workflows
 - **Comprehensive error handling** - Retryable and non-retryable error types
 - **Activity metadata** - Support for custom metadata on activities
-- **Pluggable backend system** - Trait-based abstraction allows custom backends (Redis, Valkey, Kafka, SQL, etc.)
-- **Redis/Valkey persistence** - Default backend with full Redis and Valkey compatibility
 - **Built-in observability console** - Real-time web UI for monitoring and managing activities
 - **Queue statistics** - Monitoring capabilities and metrics collection
+
+## Storage Backends
+
+| Backend | Status | Use Case |
+|---------|--------|----------|
+| **Redis** | ✅ Stable | Default. High-performance, ephemeral storage with TTL |
+| **Valkey** | ✅ Stable | Redis-compatible, drop-in replacement |
+| **PostgreSQL** | 🧪 Experimental | Permanent persistence, SQL-based queries |
+| **Custom** | ✅ Supported | Implement `Storage` trait for your own backend |
 
 ## Installation
 
@@ -641,9 +649,9 @@ let engine = WorkerEngine::builder()
     .await?;
 ```
 
-### Custom Backend Support
+### Pluggable Storage Backends
 
-Runner-Q uses a trait-based backend abstraction that allows you to swap out the persistence layer. The default Redis backend works with both Redis and Valkey (Redis-compatible).
+Runner-Q uses a trait-based storage abstraction that allows you to swap out the persistence layer. Built-in backends include Redis (default) and PostgreSQL (experimental), with full support for custom implementations.
 
 #### Architecture
 
@@ -654,14 +662,15 @@ graph TD
         WE[WorkerEngine]
     end
     
-    subgraph BackendTrait [New Backend Module]
+    subgraph StorageTraits [Storage Module]
         QB[QueueStorage trait]
         IB[InspectionStorage trait]
     end
     
     subgraph Implementations [Backend Implementations]
-        RB[RedisBackend]
-        Future[Future: ValkeyBackend, KafkaBackend, etc.]
+        RB[RedisBackend ✅]
+        PB[PostgresBackend 🧪]
+        Future[Future: KafkaBackend, etc.]
     end
     
     WEB -->|".backend()"| QB
@@ -670,6 +679,8 @@ graph TD
     WE --> IB
     RB --> QB
     RB --> IB
+    PB --> QB
+    PB --> IB
     Future -.-> QB
     Future -.-> IB
 ```
@@ -716,16 +727,63 @@ let engine = WorkerEngine::builder()
     .await?;
 ```
 
+#### PostgreSQL Backend (Experimental)
+
+> ⚠️ **IN DEVELOPMENT** - The PostgreSQL backend is feature-gated and experimental. Not recommended for production use yet.
+
+For use cases requiring permanent persistence and SQL-based queries, RunnerQ provides an experimental PostgreSQL backend:
+
+```toml
+# Cargo.toml
+[dependencies]
+runner_q = { version = "0.5", features = ["postgres"] }
+```
+
+```rust
+use runner_q::storage::PostgresBackend;
+use std::sync::Arc;
+
+// Create PostgreSQL backend
+let backend = Arc::new(
+    PostgresBackend::new(
+        "postgres://user:password@localhost/runnerq",
+        "my_queue"
+    ).await?
+);
+
+// Use with WorkerEngine
+let engine = WorkerEngine::builder()
+    .backend(backend)
+    .max_workers(8)
+    .build()
+    .await?;
+```
+
+**PostgreSQL Backend Features:**
+- **Permanent Persistence** - Activities stored indefinitely (no TTL expiration)
+- **Multi-node Safe** - Uses `FOR UPDATE SKIP LOCKED` for concurrent job claiming
+- **Cross-process Events** - PostgreSQL `LISTEN/NOTIFY` for real-time event streaming
+- **Atomic Idempotency** - Separate table with `INSERT ... ON CONFLICT` for race-safe key claiming
+- **History Preservation** - Never deletes activity records
+
+**Schema Tables Created:**
+- `runnerq_activities` - Main activity storage
+- `runnerq_events` - Event history timeline
+- `runnerq_results` - Activity execution results
+- `runnerq_idempotency` - Idempotency key mapping
+
+See `examples/postgres_example.rs` for a complete working example.
+
 #### Implementing a Custom Backend
 
-You can implement your own backend by implementing the `Backend` trait (which combines `QueueStorage` and `InspectionStorage`):
+You can implement your own backend by implementing the `Storage` trait (which combines `QueueStorage` and `InspectionStorage`):
 
 ```rust
 use runner_q::storage::{
-    Backend, QueueStorage, InspectionStorage, StorageError,
-    QueuedActivity, DequeuedActivity, FailureKind, ActivityResult,
-    QueueStats, ActivitySnapshot, ActivityEvent, DeadLetterRecord,
+    Storage, QueueStorage, InspectionStorage, StorageError,
+    QueuedActivity, DequeuedActivity, FailureKind,
 };
+use runner_q::{QueueStats, ActivitySnapshot, ActivityEvent, DeadLetterRecord};
 use async_trait::async_trait;
 use std::time::Duration;
 use uuid::Uuid;
@@ -803,9 +861,9 @@ let engine = WorkerEngine::builder()
     .await?;
 ```
 
-#### Backend Trait Reference
+#### Storage Trait Reference
 
-The backend abstraction consists of two traits:
+The storage abstraction consists of two traits:
 
 **`QueueStorage`** - Core queue operations:
 - `enqueue()` - Add activity to the queue
