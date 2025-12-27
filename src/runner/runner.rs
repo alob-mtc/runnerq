@@ -712,7 +712,7 @@ impl WorkerEngine {
                                 data: Some(json!({
                                     "error": reason,
                                     "type": "non_retryable",
-                                    "failed_at": chrono::Utc::now().to_rfc3339()
+                                    "failed_at": Utc::now().to_rfc3339()
                                 })),
                                 state: ResultState::Err,
                             };
@@ -1645,10 +1645,10 @@ impl ActivityQueueTrait for BackendQueueAdapter {
         worker_id: &str,
     ) -> Result<Option<Activity>, WorkerError> {
         match self.backend.dequeue(worker_id, timeout).await? {
-            Some(dequeued) => {
-                let mut activity = Self::queued_to_activity(&dequeued.activity);
+            Some(activity) => {
+                let mut activity = Self::queued_to_activity(&activity);
                 activity.status = crate::ActivityStatus::Running;
-                activity.retry_count = dequeued.attempt.saturating_sub(1);
+                activity.retry_count = activity.retry_count;
                 Ok(Some(activity))
             }
             None => Ok(None),
@@ -1670,7 +1670,7 @@ impl ActivityQueueTrait for BackendQueueAdapter {
         worker_id: &str,
     ) -> Result<(), WorkerError> {
         self.backend
-            .ack_success(activity.id, "", None, worker_id)
+            .ack_success(activity.id, None, worker_id)
             .await
             .map_err(Into::into)
     }
@@ -1692,7 +1692,7 @@ impl ActivityQueueTrait for BackendQueueAdapter {
             }
         };
         self.backend
-            .ack_failure(activity.id, "", failure, worker_id)
+            .ack_failure(activity.id, failure, worker_id)
             .await
             .map_err(Into::into)
     }

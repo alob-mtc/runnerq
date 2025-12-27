@@ -668,8 +668,8 @@ graph TD
     end
     
     subgraph Implementations [Backend Implementations]
-        RB[RedisBackend ✅]
-        PB[PostgresBackend 🧪]
+        RB[RedisBackend]
+        PB[PostgresBackend]
         Future[Future: KafkaBackend, etc.]
     end
     

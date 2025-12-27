@@ -69,7 +69,7 @@ use uuid::Uuid;
 use crate::activity::activity::{ActivityPriority, ActivityStatus};
 use crate::observability::{ActivityEvent, ActivityEventType, ActivitySnapshot, DeadLetterRecord};
 use crate::storage::{
-    ActivityResult, DequeuedActivity, FailureKind, IdempotencyBehavior, InspectionStorage,
+    ActivityResult, FailureKind, IdempotencyBehavior, InspectionStorage,
     QueueStats, QueueStorage, QueuedActivity, ResultState, StorageError,
 };
 
@@ -310,9 +310,8 @@ impl QueueStorage for PostgresBackend {
         &self,
         worker_id: &str,
         _timeout: Duration,
-    ) -> Result<Option<DequeuedActivity>, StorageError> {
+    ) -> Result<Option<QueuedActivity>, StorageError> {
         let deadline = Utc::now() + chrono::Duration::milliseconds(self.default_lease_ms);
-        let lease_id = Uuid::new_v4().to_string();
 
         // Use FOR UPDATE SKIP LOCKED for safe multi-node dequeue
         // This atomically claims a job without blocking other workers
@@ -376,12 +375,7 @@ impl QueueStorage for PostgresBackend {
                     "Activity claimed"
                 );
 
-                Ok(Some(DequeuedActivity {
-                    activity,
-                    lease_id,
-                    attempt: (row.retry_count + 1) as u32,
-                    lease_deadline: deadline,
-                }))
+                Ok(Some(activity))
             }
             None => Ok(None),
         }
@@ -390,7 +384,6 @@ impl QueueStorage for PostgresBackend {
     async fn ack_success(
         &self,
         activity_id: Uuid,
-        _lease_id: &str,
         result: Option<Value>,
         worker_id: &str,
     ) -> Result<(), StorageError> {
@@ -468,7 +461,6 @@ impl QueueStorage for PostgresBackend {
     async fn ack_failure(
         &self,
         activity_id: Uuid,
-        _lease_id: &str,
         failure: FailureKind,
         worker_id: &str,
     ) -> Result<bool, StorageError> {
@@ -499,21 +491,68 @@ impl QueueStorage for PostgresBackend {
             }
         };
 
-        let should_retry =
-            retryable && (activity.retry_count as u32) < (activity.max_retries as u32);
-
-        if should_retry {
-            // Calculate retry delay with exponential backoff
-            let base_delay = activity.retry_delay_seconds;
-            let backoff_multiplier = 2_i64.pow(activity.retry_count as u32);
-            let retry_delay = base_delay * backoff_multiplier;
-            let scheduled_at = now + chrono::Duration::seconds(retry_delay);
-
-            // Update for retry
+        // Non-retryable failures go straight to Failed status (not DLQ)
+        if !retryable {
             sqlx::query(
                 r#"
                 UPDATE runnerq_activities
-                SET status = 'scheduled',
+                SET status = 'failed',
+                    completed_at = $1,
+                    last_error = $2,
+                    last_error_at = $3,
+                    last_worker_id = $4,
+                    current_worker_id = NULL,
+                    lease_deadline_ms = NULL
+                WHERE id = $5
+                "#,
+            )
+            .bind(now)
+            .bind(&error_message)
+            .bind(now)
+            .bind(worker_id)
+            .bind(activity_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Internal(format!("Failed to mark as failed: {}", e)))?;
+
+            // Store failure result
+            self.store_result(
+                activity_id,
+                ActivityResult {
+                    data: Some(json!({ "error": error_message })),
+                    state: ResultState::Err,
+                },
+            )
+            .await?;
+
+            self.record_event(
+                activity_id,
+                ActivityEventType::Failed,
+                Some(worker_id),
+                Some(json!({ "retryable": false, "error": error_message })),
+            )
+            .await?;
+
+            return Ok(false);
+        }
+
+        // Check if we can retry: max_retries == 0 means infinite retries
+        // Use retry_count + 1 < max_retries to match Redis behavior
+        let can_retry = activity.max_retries == 0
+            || (activity.retry_count as u32 + 1) < (activity.max_retries as u32);
+
+        if can_retry {
+            // Calculate retry delay with exponential backoff
+            let base_delay = activity.retry_delay_seconds;
+            let backoff_multiplier = 2_i64.pow(activity.retry_count as u32 + 1);
+            let retry_delay = base_delay * backoff_multiplier;
+            let scheduled_at = now + chrono::Duration::seconds(retry_delay);
+
+            // Update for retry - use 'retrying' status to match Redis
+            sqlx::query(
+                r#"
+                UPDATE runnerq_activities
+                SET status = 'retrying',
                     retry_count = retry_count + 1,
                     scheduled_at = $1,
                     last_error = $2,
@@ -545,51 +584,51 @@ impl QueueStorage for PostgresBackend {
             )
             .await?;
 
-            Ok(false)
-        } else {
-            // Move to dead letter queue
-            sqlx::query(
-                r#"
-                UPDATE runnerq_activities
-                SET status = 'dead_letter',
-                    completed_at = $1,
-                    last_error = $2,
-                    last_error_at = $3,
-                    last_worker_id = $4,
-                    current_worker_id = NULL,
-                    lease_deadline_ms = NULL
-                WHERE id = $5
-                "#,
-            )
-            .bind(now)
-            .bind(&error_message)
-            .bind(now)
-            .bind(worker_id)
-            .bind(activity_id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| StorageError::Internal(format!("Failed to move to DLQ: {}", e)))?;
-
-            // Store failure result
-            self.store_result(
-                activity_id,
-                ActivityResult {
-                    data: Some(json!({ "error": error_message })),
-                    state: ResultState::Err,
-                },
-            )
-            .await?;
-
-            self.record_event(
-                activity_id,
-                ActivityEventType::DeadLetter,
-                Some(worker_id),
-                Some(json!({ "error": error_message })),
-            )
-            .await?;
-
-            Ok(true)
+            return Ok(false);
         }
+
+        // Move to dead letter queue - exhausted all retries
+        sqlx::query(
+            r#"
+            UPDATE runnerq_activities
+            SET status = 'dead_letter',
+                completed_at = $1,
+                last_error = $2,
+                last_error_at = $3,
+                last_worker_id = $4,
+                current_worker_id = NULL,
+                lease_deadline_ms = NULL
+            WHERE id = $5
+            "#,
+        )
+        .bind(now)
+        .bind(&error_message)
+        .bind(now)
+        .bind(worker_id)
+        .bind(activity_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Internal(format!("Failed to move to DLQ: {}", e)))?;
+
+        // Store failure result
+        self.store_result(
+            activity_id,
+            ActivityResult {
+                data: Some(json!({ "error": error_message })),
+                state: ResultState::Err,
+            },
+        )
+        .await?;
+
+        self.record_event(
+            activity_id,
+            ActivityEventType::DeadLetter,
+            Some(worker_id),
+            Some(json!({ "error": error_message })),
+        )
+        .await?;
+
+        Ok(true)
     }
 
     async fn process_scheduled(&self) -> Result<u64, StorageError> {
@@ -600,7 +639,7 @@ impl QueueStorage for PostgresBackend {
             UPDATE runnerq_activities
             SET status = 'pending', scheduled_at = NULL
             WHERE queue_name = $1
-              AND status = 'scheduled'
+              AND status IN ('scheduled', 'retrying')
               AND scheduled_at <= $2
             "#,
         )
@@ -893,7 +932,7 @@ impl InspectionStorage for PostgresBackend {
             match status.as_str() {
                 "pending" => stats.pending = count as u64,
                 "processing" => stats.processing = count as u64,
-                "scheduled" => stats.scheduled = count as u64,
+                "scheduled" | "retrying" => stats.scheduled += count as u64,
                 "dead_letter" => stats.dead_letter = count as u64,
                 _ => {}
             }
@@ -933,7 +972,28 @@ impl InspectionStorage for PostgresBackend {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ActivitySnapshot>, StorageError> {
-        self.list_by_status("scheduled", offset, limit).await
+        // Include both 'scheduled' and 'retrying' statuses
+        let rows: Vec<ActivityRow> = sqlx::query_as(
+            r#"
+            SELECT * FROM runnerq_activities
+            WHERE queue_name = $1 AND status IN ('scheduled', 'retrying')
+            ORDER BY scheduled_at ASC, created_at ASC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(&self.queue_name)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Internal(format!("Failed to list scheduled: {}", e)))?;
+
+        let mut snapshots = Vec::new();
+        for row in rows {
+            snapshots.push(row.to_snapshot()?);
+        }
+
+        Ok(snapshots)
     }
 
     async fn list_completed(
@@ -1169,7 +1229,9 @@ impl ActivityRow {
             "processing" => ActivityStatus::Running,
             "completed" => ActivityStatus::Completed,
             "scheduled" => ActivityStatus::Pending,
-            "dead_letter" => ActivityStatus::Failed,
+            "retrying" => ActivityStatus::Retrying,
+            "failed" => ActivityStatus::Failed,
+            "dead_letter" => ActivityStatus::DeadLetter,
             _ => ActivityStatus::Pending,
         };
 
@@ -1268,7 +1330,7 @@ CREATE INDEX IF NOT EXISTS idx_runnerq_activities_queue_status
     ON runnerq_activities(queue_name, status, priority DESC, created_at);
 CREATE INDEX IF NOT EXISTS idx_runnerq_activities_scheduled
     ON runnerq_activities(queue_name, scheduled_at)
-    WHERE status = 'scheduled';
+    WHERE status IN ('scheduled', 'retrying');
 CREATE INDEX IF NOT EXISTS idx_runnerq_activities_processing
     ON runnerq_activities(queue_name, lease_deadline_ms)
     WHERE status = 'processing';

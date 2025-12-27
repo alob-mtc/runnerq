@@ -197,15 +197,12 @@ pub trait QueueStorage: Send + Sync {
         &self,
         worker_id: &str,
         timeout: std::time::Duration,
-    ) -> Result<Option<DequeuedActivity>, StorageError>;
+    ) -> Result<Option<QueuedActivity>, StorageError>;
 
     /// Mark a dequeued activity as successfully completed.
-    ///
-    /// The `lease_id` must match the one returned from `dequeue`.
     async fn ack_success(
         &self,
         activity_id: Uuid,
-        lease_id: &str,
         result: Option<Value>,
         worker_id: &str,
     ) -> Result<(), StorageError>;
@@ -221,7 +218,6 @@ pub trait QueueStorage: Send + Sync {
     async fn ack_failure(
         &self,
         activity_id: Uuid,
-        lease_id: &str,
         failure: FailureKind,
         worker_id: &str,
     ) -> Result<bool, StorageError>;

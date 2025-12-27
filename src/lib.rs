@@ -1,6 +1,9 @@
-//! Runner-Q: A Redis-based activity queue and worker system for Rust
+//! Runner-Q: A pluggable activity queue and worker system for Rust
 //!
-//! This crate provides a robust, scalable activity queue system built on Redis with support for:
+//! This crate provides a robust, scalable activity queue system with pluggable storage backends:
+//!
+//! ## Features
+//!
 //! - **Priority-based activity processing** with Critical, High, Normal, and Low priority levels
 //! - **Activity scheduling** with precise timestamp-based scheduling for future execution
 //! - **Intelligent retry mechanism** with exponential backoff for failed activities
@@ -10,8 +13,45 @@
 //! - **Activity orchestration** enabling activities to execute other activities
 //! - **Comprehensive error handling** with retryable and non-retryable error types
 //! - **Activity metadata** support for context and tracking
-//! - **Redis persistence** for durability and scalability
+//! - **Pluggable storage backends** - Redis (default), PostgreSQL, or bring your own
 //! - **Queue statistics** and monitoring capabilities
+//! - **Web-based observability console** for real-time monitoring
+//!
+//! ## Storage Backends
+//!
+//! Runner-Q supports multiple storage backends through the [`Storage`] trait:
+//!
+//! | Backend | Feature Flag | Status | Description |
+//! |---------|--------------|--------|-------------|
+//! | Redis | (default) | Stable | High-performance with Lua scripts for atomicity |
+//! | PostgreSQL | `postgres` | In Development | Permanent persistence with `FOR UPDATE SKIP LOCKED` |
+//!
+//! ### Using a Custom Backend
+//!
+//! ```rust,ignore
+//! use runner_q::{WorkerEngine, Storage};
+//! use std::sync::Arc;
+//!
+//! // With default Redis backend
+//! let engine = WorkerEngine::builder()
+//!     .redis_url("redis://localhost:6379")
+//!     .queue_name("my_app")
+//!     .build()
+//!     .await?;
+//!
+//! // With custom backend (e.g., PostgreSQL)
+//! #[cfg(feature = "postgres")]
+//! {
+//!     use runner_q::storage::PostgresBackend;
+//!     let backend = Arc::new(
+//!         PostgresBackend::new("postgres://localhost/mydb", "my_queue").await?
+//!     );
+//!     let engine = WorkerEngine::builder()
+//!         .backend(backend)
+//!         .build()
+//!         .await?;
+//! }
+//! ```
 //!
 //! # Example
 //!
@@ -221,7 +261,11 @@ pub use activity::activity::{
 };
 pub use activity::error::{ActivityError, RetryableError};
 
-// Re-export backend types for custom backend implementations
+// Re-export storage types for custom backend implementations
 pub use crate::storage::{
     redis::RedisConfig, InspectionStorage, QueueStorage, RedisBackend, Storage, StorageError,
 };
+
+// Re-export PostgresBackend when the postgres feature is enabled
+#[cfg(feature = "postgres")]
+pub use crate::storage::PostgresBackend;

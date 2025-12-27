@@ -23,9 +23,7 @@
 
 use async_trait::async_trait;
 use axum::{serve, Router};
-use runner_q::{
-    runnerq_ui, storage::PostgresBackend, ActivityContext, ActivityHandler, ActivityHandlerResult, WorkerEngine,
-};
+use runner_q::{runnerq_ui, storage::PostgresBackend, ActivityContext, ActivityError, ActivityHandler, ActivityHandlerResult, WorkerEngine};
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
@@ -43,10 +41,13 @@ impl ActivityHandler for TestActivity {
     async fn handle(
         &self,
         payload: serde_json::Value,
-        _ctx: ActivityContext,
+        ctx: ActivityContext,
     ) -> ActivityHandlerResult {
         println!("🔄 Processing test activity: {:?}", payload);
         tokio::time::sleep(Duration::from_secs(5)).await;
+        if ctx.retry_count < 2 {
+            return Err(ActivityError::Retry("Test activity failed".to_string()));
+        }
         println!("✅ Completed test activity");
         Ok(Some(serde_json::json!({"status": "completed"})))
     }
