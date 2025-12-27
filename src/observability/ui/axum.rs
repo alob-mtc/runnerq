@@ -259,4 +259,3 @@ async fn event_stream(
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
-
