@@ -1,5 +1,4 @@
 use crate::storage::StorageError;
-use redis::RedisError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -31,6 +30,9 @@ pub enum WorkerError {
     #[error("Configuration error: {0}")]
     ConfigError(String),
 
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+
     #[error("Worker shutdown requested")]
     Shutdown,
 
@@ -50,8 +52,9 @@ pub enum WorkerError {
     Unknown(String),
 }
 
-impl From<RedisError> for WorkerError {
-    fn from(err: RedisError) -> Self {
+#[cfg(feature = "redis")]
+impl From<redis::RedisError> for WorkerError {
+    fn from(err: redis::RedisError) -> Self {
         WorkerError::RedisError(err.to_string())
     }
 }

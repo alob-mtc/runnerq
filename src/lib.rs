@@ -248,9 +248,10 @@ pub mod storage;
 // Re-export main types for easy access
 pub use crate::config::WorkerConfig;
 pub use crate::observability::{
-    observability_api, runnerq_ui, ActivityEvent, ActivityEventType, ActivitySnapshot,
-    DeadLetterRecord, QueueInspector, QueueStats,
+    ActivityEvent, ActivityEventType, ActivitySnapshot, DeadLetterRecord, QueueStats,
 };
+#[cfg(feature = "redis")]
+pub use crate::observability::{observability_api, runnerq_ui, QueueInspector};
 pub use crate::runner::error::WorkerError;
 pub use crate::runner::runner::{
     ActivityBuilder, ActivityExecutor, MetricsSink, WorkerEngine, WorkerEngineBuilder,
@@ -262,9 +263,11 @@ pub use activity::activity::{
 pub use activity::error::{ActivityError, RetryableError};
 
 // Re-export storage types for custom backend implementations
-pub use crate::storage::{
-    redis::RedisConfig, InspectionStorage, QueueStorage, RedisBackend, Storage, StorageError,
-};
+pub use crate::storage::{InspectionStorage, QueueStorage, Storage, StorageError};
+
+// Re-export RedisBackend when the redis feature is enabled
+#[cfg(feature = "redis")]
+pub use crate::storage::{redis::RedisConfig, RedisBackend};
 
 // Re-export PostgresBackend when the postgres feature is enabled
 #[cfg(feature = "postgres")]
