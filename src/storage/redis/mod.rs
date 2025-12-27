@@ -213,7 +213,7 @@ impl Default for RedisBackendBuilder {
 }
 
 // ============================================================================
-// QueueBackend Implementation
+// QueueStorage Implementation
 // ============================================================================
 
 #[async_trait]
@@ -287,7 +287,7 @@ impl QueueStorage for RedisBackend {
 }
 
 // ============================================================================
-// InspectionBackend Implementation
+// InspectionStorage Implementation
 // ============================================================================
 
 #[async_trait]

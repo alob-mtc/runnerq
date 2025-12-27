@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
                     "timestamp": chrono::Utc::now().to_rfc3339()
                 }))
                 .idempotency_key(
-                    "uuid::Uuid::new_v4().to_string()",
+                    uuid::Uuid::new_v4().to_string(),
                     runner_q::OnDuplicate::ReturnExisting,
                 )
                 .execute()

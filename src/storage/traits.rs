@@ -15,18 +15,18 @@
 //! # Example: Implementing a Custom Backend
 //!
 //! ```rust,ignore
-//! use runner_q::storage::{QueueBackend, InspectionBackend, StorageError};
+//! use runner_q::storage::{QueueStorage, InspectionStorage, StorageError};
 //! use async_trait::async_trait;
 //!
 //! pub struct MyBackend { /* ... */ }
 //!
 //! #[async_trait]
-//! impl QueueBackend for MyBackend {
+//! impl QueueStorage for MyBackend {
 //!     // Implement queue operations...
 //! }
 //!
 //! #[async_trait]
-//! impl InspectionBackend for MyBackend {
+//! impl InspectionStorage for MyBackend {
 //!     // Implement inspection operations...
 //! }
 //! ```
@@ -165,7 +165,7 @@ pub struct PriorityBreakdown {
 }
 
 // ============================================================================
-// QueueBackend Trait - Core queue operations
+// QueueStorage Trait - Core queue operations
 // ============================================================================
 
 /// Core trait for queue operations.

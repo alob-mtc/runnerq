@@ -655,8 +655,8 @@ graph TD
     end
     
     subgraph BackendTrait [New Backend Module]
-        QB[QueueBackend trait]
-        IB[InspectionBackend trait]
+        QB[QueueStorage trait]
+        IB[InspectionStorage trait]
     end
     
     subgraph Implementations [Backend Implementations]
@@ -718,11 +718,11 @@ let engine = WorkerEngine::builder()
 
 #### Implementing a Custom Backend
 
-You can implement your own backend by implementing the `Backend` trait (which combines `QueueBackend` and `InspectionBackend`):
+You can implement your own backend by implementing the `Backend` trait (which combines `QueueStorage` and `InspectionStorage`):
 
 ```rust
 use runner_q::storage::{
-    Backend, QueueBackend, InspectionBackend, StorageError,
+    Backend, QueueStorage, InspectionStorage, StorageError,
     QueuedActivity, DequeuedActivity, FailureKind, ActivityResult,
     QueueStats, ActivitySnapshot, ActivityEvent, DeadLetterRecord,
 };
@@ -735,7 +735,7 @@ pub struct MyCustomBackend {
 }
 
 #[async_trait]
-impl QueueBackend for MyCustomBackend {
+impl QueueStorage for MyCustomBackend {
     async fn enqueue(&self, activity: QueuedActivity) -> Result<(), StorageError> {
         // Implement activity enqueuing
         todo!()
@@ -776,7 +776,7 @@ impl QueueBackend for MyCustomBackend {
 }
 
 #[async_trait]
-impl InspectionBackend for MyCustomBackend {
+impl InspectionStorage for MyCustomBackend {
     async fn stats(&self) -> Result<QueueStats, StorageError> {
         // Return queue statistics
         todo!()
@@ -807,7 +807,7 @@ let engine = WorkerEngine::builder()
 
 The backend abstraction consists of two traits:
 
-**`QueueBackend`** - Core queue operations:
+**`QueueStorage`** - Core queue operations:
 - `enqueue()` - Add activity to the queue
 - `dequeue()` - Claim an activity for processing
 - `ack_success()` - Mark activity as completed
@@ -818,7 +818,7 @@ The backend abstraction consists of two traits:
 - `store_result()` / `get_result()` - Activity result storage
 - `check_idempotency()` - Idempotency key handling
 
-**`InspectionBackend`** - Observability operations:
+**`InspectionStorage`** - Observability operations:
 - `stats()` - Get queue statistics
 - `list_pending()` / `list_processing()` / `list_scheduled()` / `list_completed()` - List activities by status
 - `list_dead_letter()` - List dead-lettered activities
