@@ -1,3 +1,8 @@
+//! Axum-based HTTP endpoints for the RunnerQ Console UI.
+//!
+//! This module provides Axum routers for serving the observability API
+//! and the Console UI.
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -14,7 +19,7 @@ use serde::Deserialize;
 use crate::observability::inspector::QueueInspector;
 use crate::observability::models::{ActivityEvent, DeadLetterRecord, QueueStats};
 
-const CONSOLE_HTML: &str = include_str!("../../ui/runnerq-console.html");
+use super::html::CONSOLE_HTML;
 
 #[derive(Clone)]
 struct UiState {
@@ -236,7 +241,6 @@ async fn dead_letters(
 async fn event_stream(
     State(state): State<UiState>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, axum::Error>>>, StatusCode> {
-    // Get event stream directly from Redis Streams
     let stream = state.inspector.event_stream();
 
     // Convert ActivityEvent stream to SSE Event stream
@@ -255,3 +259,4 @@ async fn event_stream(
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
+

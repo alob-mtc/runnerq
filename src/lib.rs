@@ -248,9 +248,11 @@ pub mod storage;
 // Re-export main types for easy access
 pub use crate::config::WorkerConfig;
 #[cfg(any(feature = "redis", feature = "postgres"))]
-pub use crate::observability::{observability_api, runnerq_ui, QueueInspector};
+pub use crate::observability::QueueInspector;
+#[cfg(all(feature = "axum-ui", any(feature = "redis", feature = "postgres")))]
+pub use crate::observability::{observability_api, runnerq_ui};
 pub use crate::observability::{
-    ActivityEvent, ActivityEventType, ActivitySnapshot, DeadLetterRecord, QueueStats,
+    ActivityEvent, ActivityEventType, ActivitySnapshot, DeadLetterRecord, QueueStats, CONSOLE_HTML,
 };
 pub use crate::runner::error::WorkerError;
 pub use crate::runner::runner::{
