@@ -2675,8 +2675,9 @@
                 };
 
                 // Results section - create DOM elements safely
+                // API returns the result value directly (not wrapped in {data: ...})
                 const resultData =
-                    result?.data || activity.result || activity.output || null;
+                    result || activity.result || activity.output || null;
                 const createResultSection = () => {
                     const section = document.createElement("div");
                     if (resultData) {
