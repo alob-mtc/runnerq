@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     // Custom backend
     let backend = RedisBackend::builder()
         .redis_url(&redis_url)
-        .queue_name("test_sse_xxx")
+        .queue_name("test_sse")
         .build()
         .await?;
 

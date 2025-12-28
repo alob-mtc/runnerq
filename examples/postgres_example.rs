@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Connecting to PostgreSQL at: {}", safe_url);
 
     // Create PostgreSQL backend
-    let backend = PostgresBackend::new(&database_url, "example_queue_22").await?;
+    let backend = PostgresBackend::new(&database_url, "example_queue").await?;
     let backend = Arc::new(backend);
 
     info!("✓ PostgreSQL backend initialized");
