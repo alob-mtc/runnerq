@@ -51,13 +51,14 @@ async fn get_conn(
 ///
 /// The algorithm:
 /// - Base priority weight (Critical > High > Normal > Low)
-/// - Age boost: activities waiting longer accumulate priority (~1 point/second, capped)
-/// - Retry boost: exponential boost for activities that have failed (10k * retry^2)
+/// - Age boost: activities waiting longer accumulate priority (~1 point/second, capped at 100k)
+/// - Retry boost: exponential boost for activities that have failed (10k * retry², capped at 500k)
 /// - FIFO ordering within same priority/age/retries
 ///
 /// Combined with exponential backoff, this ensures:
 /// - While retrying activities wait in scheduled queue, new activities flow through
 /// - When retrying activities become ready, they get fair priority to complete
+/// - High-retry items get significant boost but cannot overwhelm base priority weights
 fn calculate_priority_score(
     priority: &ActivityPriority,
     created_at: DateTime<Utc>,
@@ -77,7 +78,9 @@ fn calculate_priority_score(
 
     // Retry boost: exponential - activities that keep failing deserve completion
     // retry 1 = 10k, retry 2 = 40k, retry 3 = 90k, retry 4 = 160k, etc.
-    let retry_boost = (retry_count as f64).powi(2) * 10_000.0;
+    // Capped at 500k to prevent high-retry items from overwhelming base priority weights
+    // (500k cap is reached at ~7 retries, ensuring priority levels still matter)
+    let retry_boost = ((retry_count as f64).powi(2) * 10_000.0).min(500_000.0);
 
     // Base FIFO ordering: within same priority/age/retries, older activities first
     // Invert timestamp so older = higher score (subtract from a large constant)
