@@ -413,6 +413,15 @@ impl QueueStorage for PostgresBackend {
 
         // Use FOR UPDATE SKIP LOCKED for safe multi-node dequeue
         // This atomically claims a job without blocking other workers
+        //
+        // Age-weighted fair scheduling:
+        // 1. Priority: higher priority activities first
+        // 2. Retry boost: activities that have failed more times get priority (avoids starvation)
+        // 3. Age: older activities within same priority/retry get processed first (FIFO)
+        //
+        // This balances responsiveness (new activities get processed) with fairness
+        // (retrying activities eventually complete). Exponential backoff provides
+        // natural breathing room while activities wait in scheduled state.
         let result: Option<ActivityRow> = sqlx::query_as(
             r#"
             UPDATE runnerq_activities
@@ -425,7 +434,10 @@ impl QueueStorage for PostgresBackend {
                 WHERE queue_name = $4
                   AND status = 'pending'
                   AND (scheduled_at IS NULL OR scheduled_at <= $5)
-                ORDER BY priority DESC, created_at ASC
+                ORDER BY 
+                    priority DESC,
+                    retry_count DESC,
+                    created_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
@@ -1220,7 +1232,7 @@ impl PostgresBackend {
             r#"
             SELECT * FROM runnerq_activities
             WHERE queue_name = $1 AND status = $2
-            ORDER BY priority DESC, created_at ASC
+            ORDER BY priority DESC, retry_count DESC, created_at ASC
             LIMIT $3 OFFSET $4
             "#,
         )

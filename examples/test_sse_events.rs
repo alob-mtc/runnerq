@@ -98,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
                     "counter": counter,
                     "timestamp": chrono::Utc::now().to_rfc3339()
                 }))
+                .max_retries(5)
                 .idempotency_key(
                     uuid::Uuid::new_v4().to_string(),
                     runner_q::OnDuplicate::ReturnExisting,
