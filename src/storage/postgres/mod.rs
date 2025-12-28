@@ -307,22 +307,44 @@ impl PostgresBackend {
     }
 
     async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError> {
-        let row: Option<(String, Option<Value>)> =
+        // Query result row - use explicit column selection for JSONB
+        let row: Option<ResultRow> =
             sqlx::query_as(r#"SELECT state, data FROM runnerq_results WHERE activity_id = $1"#)
                 .bind(activity_id)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(|e| StorageError::Internal(format!("Failed to get result: {}", e)))?;
 
-        Ok(row.map(|(state, data)| ActivityResult {
-            data,
-            state: if state == "Ok" {
+        match &row {
+            Some(r) => {
+                debug!(
+                    activity_id = %activity_id,
+                    state = %r.state,
+                    has_data = r.data.is_some(),
+                    "Retrieved activity result"
+                );
+            }
+            None => {
+                debug!(activity_id = %activity_id, "No result found for activity");
+            }
+        }
+
+        Ok(row.map(|r| ActivityResult {
+            data: r.data,
+            state: if r.state == "Ok" {
                 ResultState::Ok
             } else {
                 ResultState::Err
             },
         }))
     }
+}
+
+/// Helper struct for querying result rows
+#[derive(Debug, FromRow)]
+struct ResultRow {
+    state: String,
+    data: Option<Value>,
 }
 
 // ============================================================================
@@ -550,20 +572,6 @@ impl QueueStorage for PostgresBackend {
             })),
         )
         .await?;
-
-        // Record ResultStored event if we stored a result
-        if let Some(data) = result {
-            self.record_event(
-                activity_id,
-                ActivityEventType::ResultStored,
-                None,
-                Some(json!({
-                    "state": "Ok",
-                    "data": data
-                })),
-            )
-            .await?;
-        }
 
         Ok(())
     }
@@ -840,6 +848,13 @@ impl QueueStorage for PostgresBackend {
             ResultState::Err => "Err",
         };
 
+        debug!(
+            activity_id = %activity_id,
+            state = %state_str,
+            has_data = result.data.is_some(),
+            "Storing activity result"
+        );
+
         sqlx::query(
             r#"
             INSERT INTO runnerq_results (activity_id, queue_name, state, data, created_at)
@@ -857,6 +872,20 @@ impl QueueStorage for PostgresBackend {
         .await
         .map_err(|e| StorageError::Internal(format!("Failed to store result: {}", e)))?;
 
+        // Record ResultStored event (matching Redis behavior)
+        let result_value = json!({
+            "state": state_str,
+            "data": result.data
+        });
+        self.record_event(
+            activity_id,
+            ActivityEventType::ResultStored,
+            None,
+            Some(result_value),
+        )
+        .await?;
+
+        debug!(activity_id = %activity_id, "Activity result stored");
         Ok(())
     }
 
