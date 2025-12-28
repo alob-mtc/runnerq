@@ -215,7 +215,7 @@ impl QueueInspector {
     }
 
     /// Convert a backend DeadLetterRecord to a local DeadLetterRecord
-    fn convert_backend_dead_letter(record: crate::storage::DeadLetterRecord) -> DeadLetterRecord {
+    fn convert_backend_dead_letter(record: DeadLetterRecord) -> DeadLetterRecord {
         DeadLetterRecord {
             activity: Self::convert_backend_snapshot(record.activity),
             error: record.error,
@@ -225,7 +225,7 @@ impl QueueInspector {
 
     /// Convert a backend ActivityEvent to a queue ActivityEvent.
     /// Since both backend and observability use the same types, this is now a simple passthrough.
-    fn convert_backend_event(event: crate::storage::ActivityEvent) -> ActivityEvent {
+    fn convert_backend_event(event: ActivityEvent) -> ActivityEvent {
         // The backend re-exports ActivityEvent from observability, so types are identical
         event
     }

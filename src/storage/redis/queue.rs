@@ -43,15 +43,48 @@ async fn get_conn(
         .map_err(|e| StorageError::Unavailable(format!("Failed to get Redis connection: {}", e)))
 }
 
-fn calculate_priority_score(priority: &ActivityPriority, created_at: DateTime<Utc>) -> f64 {
+/// Calculate priority score using age-weighted fair scheduling.
+///
+/// This balances two competing concerns:
+/// 1. New activities should be processed promptly (responsiveness)
+/// 2. Retrying activities shouldn't starve (fairness)
+///
+/// The algorithm:
+/// - Base priority weight (Critical > High > Normal > Low)
+/// - Age boost: activities waiting longer accumulate priority (~1 point/second, capped)
+/// - Retry boost: exponential boost for activities that have failed (10k * retry^2)
+/// - FIFO ordering within same priority/age/retries
+///
+/// Combined with exponential backoff, this ensures:
+/// - While retrying activities wait in scheduled queue, new activities flow through
+/// - When retrying activities become ready, they get fair priority to complete
+fn calculate_priority_score(
+    priority: &ActivityPriority,
+    created_at: DateTime<Utc>,
+    retry_count: u32,
+) -> f64 {
     let priority_weight = match priority {
         ActivityPriority::Critical => 4_000_000.0,
         ActivityPriority::High => 3_000_000.0,
         ActivityPriority::Normal => 2_000_000.0,
         ActivityPriority::Low => 1_000_000.0,
     };
-    let timestamp_micros = created_at.timestamp_micros() as f64 / 1_000_000.0;
-    priority_weight + (timestamp_micros % 1_000_000.0)
+
+    // Age boost: activities waiting longer get priority
+    // ~1 point per second of age, capped at 100k (~27 hours)
+    let age_seconds = (Utc::now() - created_at).num_seconds().max(0) as f64;
+    let age_boost = age_seconds.min(100_000.0);
+
+    // Retry boost: exponential - activities that keep failing deserve completion
+    // retry 1 = 10k, retry 2 = 40k, retry 3 = 90k, retry 4 = 160k, etc.
+    let retry_boost = (retry_count as f64).powi(2) * 10_000.0;
+
+    // Base FIFO ordering: within same priority/age/retries, older activities first
+    // Invert timestamp so older = higher score (subtract from a large constant)
+    let timestamp_fraction = (created_at.timestamp_micros() as f64 / 1_000_000.0) % 1_000_000.0;
+    let fifo_offset = (1_000_000.0 - timestamp_fraction) / 1_000.0; // Scale down to not dominate
+
+    priority_weight + age_boost + retry_boost + fifo_offset
 }
 
 fn create_queue_entry(activity: &QueuedActivity) -> String {
@@ -408,7 +441,11 @@ pub async fn enqueue(backend: &RedisBackend, activity: QueuedActivity) -> Result
     // Immediate enqueue
     let queue_key = backend.main_queue_key();
     let queue_entry = create_queue_entry(&activity);
-    let score = calculate_priority_score(&activity.priority, activity.created_at);
+    let score = calculate_priority_score(
+        &activity.priority,
+        activity.created_at,
+        activity.retry_count,
+    );
 
     let _: () = conn.zadd(&queue_key, queue_entry, score).await?;
 
@@ -505,6 +542,7 @@ pub async fn dequeue(
             snapshot.score = Some(calculate_priority_score(
                 &activity.priority,
                 activity.created_at,
+                activity.retry_count,
             ));
 
             write_snapshot(&mut conn, backend, &snapshot).await?;
@@ -824,8 +862,13 @@ pub async fn process_scheduled(backend: &RedisBackend) -> Result<u64, StorageErr
     // Parse moved activities and update snapshots/events
     for queue_entry in &moved_entries {
         if let Ok(activity) = parse_queue_entry(queue_entry) {
-            // Calculate correct priority score
-            let correct_score = calculate_priority_score(&activity.priority, activity.created_at);
+            // Calculate correct priority score with retry count for fair scheduling
+            // Activities that have been retrying get a priority boost
+            let correct_score = calculate_priority_score(
+                &activity.priority,
+                activity.created_at,
+                activity.retry_count,
+            );
 
             // Check current score in queue and update if needed
             let current_score: Option<f64> = conn.zscore(&main_key, queue_entry).await?;

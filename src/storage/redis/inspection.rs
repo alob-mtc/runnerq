@@ -188,13 +188,23 @@ pub async fn list_scheduled(
 ) -> Result<Vec<ActivitySnapshot>, StorageError> {
     let mut conn = get_conn(backend).await?;
     let range = slice_to_range(offset, limit);
-    let activity_jsons: Vec<String> = conn
+    // Scheduled entries are stored in format "uuid:json"
+    let entries: Vec<String> = conn
         .zrange(backend.scheduled_key(), *range.start(), *range.end())
         .await?;
 
-    let mut snapshots = Vec::with_capacity(activity_jsons.len());
-    for activity_json in activity_jsons {
-        match serde_json::from_str::<QueuedActivity>(&activity_json) {
+    let mut snapshots = Vec::with_capacity(entries.len());
+    for entry in entries {
+        // Parse the entry format: "uuid:json"
+        let json_part = match entry.split_once(':') {
+            Some((_, json)) => json,
+            None => {
+                warn!(entry = %entry, "Scheduled entry missing colon separator");
+                continue;
+            }
+        };
+
+        match serde_json::from_str::<QueuedActivity>(json_part) {
             Ok(activity) => {
                 let snapshot = match load_snapshot(&mut conn, &activity.id).await? {
                     Some(s) => snapshot_to_public(&s),
@@ -203,7 +213,7 @@ pub async fn list_scheduled(
                 snapshots.push(snapshot);
             }
             Err(e) => {
-                warn!(error = %e, "Failed to parse scheduled activity JSON");
+                warn!(error = %e, json = %json_part, "Failed to parse scheduled activity JSON");
             }
         }
     }
