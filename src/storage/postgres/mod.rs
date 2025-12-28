@@ -885,7 +885,7 @@ impl QueueStorage for PostgresBackend {
         )
         .await?;
 
-        tracing::info!(activity_id = %activity_id, "Activity result stored");
+        debug!(activity_id = %activity_id, "Activity result stored");
         Ok(())
     }
 
