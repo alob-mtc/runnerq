@@ -573,20 +573,6 @@ impl QueueStorage for PostgresBackend {
         )
         .await?;
 
-        // Record ResultStored event if we stored a result
-        if let Some(data) = result {
-            self.record_event(
-                activity_id,
-                ActivityEventType::ResultStored,
-                None,
-                Some(json!({
-                    "state": "Ok",
-                    "data": data
-                })),
-            )
-            .await?;
-        }
-
         Ok(())
     }
 
