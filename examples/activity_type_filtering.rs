@@ -62,7 +62,7 @@ impl ActivityHandler for SmsHandler {
         payload: serde_json::Value,
         _ctx: ActivityContext,
     ) -> ActivityHandlerResult {
-        info!("[email-node] sending SMS: {}", payload);
+        info!("[sms] sending SMS: {}", payload);
         tokio::time::sleep(Duration::from_millis(300)).await;
         Ok(Some(serde_json::json!({"sent": true})))
     }
