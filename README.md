@@ -15,6 +15,7 @@ A robust, scalable activity queue and worker system for Rust applications with p
 - **Comprehensive error handling** - Retryable and non-retryable error types
 - **Activity metadata** - Support for custom metadata on activities
 - **Built-in observability console** - Real-time web UI for monitoring and managing activities
+- **Worker-level activity type filtering** - Isolate workloads by restricting each engine to specific activity types
 - **Queue statistics** - Monitoring capabilities and metrics collection
 
 ## Storage Backends
@@ -23,7 +24,7 @@ A robust, scalable activity queue and worker system for Rust applications with p
 |---------|--------|----------|
 | **Redis** | ✅ Stable | Default. High-performance, ephemeral storage with TTL |
 | **Valkey** | ✅ Stable | Redis-compatible, drop-in replacement |
-| **PostgreSQL** | 🧪 Experimental | Permanent persistence, SQL-based queries |
+| **PostgreSQL** | ✅ Stable | Permanent persistence, SQL-based queries |
 | **Custom** | ✅ Supported | Implement `Storage` trait for your own backend |
 
 ## Installation
@@ -223,6 +224,14 @@ let backend = RedisBackend::builder()
 let engine = WorkerEngine::builder()
     .backend(Arc::new(backend))
     .max_workers(8)
+    .build()
+    .await?;
+
+// Restrict this engine to specific activity types (workload isolation)
+let engine = WorkerEngine::builder()
+    .redis_url("redis://localhost:6379")
+    .queue_name("my_app")
+    .activity_types(&["send_email", "send_sms"])
     .build()
     .await?;
 ```
@@ -625,6 +634,52 @@ let future = activity_executor
     .await?;
 ```
 
+### Workload Isolation (Activity Type Filtering)
+
+By default every worker engine dequeues all activity types from the queue. When you need to isolate workloads — for example, keeping slow report-generation jobs from starving latency-sensitive email sends — you can restrict each engine to specific activity types with `.activity_types()`:
+
+```rust
+use runner_q::{WorkerEngine, storage::PostgresBackend};
+use std::sync::Arc;
+
+let backend = Arc::new(
+    PostgresBackend::new("postgres://localhost/runnerq", "my_app").await?
+);
+
+// Node 1 — only processes email-related activities
+let mut email_engine = WorkerEngine::builder()
+    .backend(backend.clone())
+    .activity_types(&["send_email", "send_sms"])
+    .max_workers(4)
+    .build()
+    .await?;
+email_engine.register_activity("send_email".into(), Arc::new(SendEmailHandler));
+email_engine.register_activity("send_sms".into(), Arc::new(SendSmsHandler));
+
+// Node 2 — only processes trades
+let mut trade_engine = WorkerEngine::builder()
+    .backend(backend.clone())
+    .activity_types(&["execute_trade"])
+    .max_workers(8)
+    .build()
+    .await?;
+trade_engine.register_activity("execute_trade".into(), Arc::new(TradeHandler));
+
+// Node 3 — catch-all, processes anything not claimed above
+let mut catchall_engine = WorkerEngine::builder()
+    .backend(backend.clone())
+    .max_workers(2)
+    .build()
+    .await?;
+// Register all handlers on the catch-all node
+```
+
+All engines share the same backend and queue. Each engine's `dequeue()` only claims activities matching its declared types; an engine with no filter acts as a catch-all.
+
+**Startup validation:** If `activity_types` is set and any listed type does not have a registered handler, the engine panics at `start()` with a clear error message.
+
+See `examples/activity_type_filtering.rs` for a complete working example.
+
 ### Redis Configuration
 
 Fine-tune Redis connection behavior for your specific needs:
@@ -651,7 +706,7 @@ let engine = WorkerEngine::builder()
 
 ### Pluggable Storage Backends
 
-Runner-Q uses a trait-based storage abstraction that allows you to swap out the persistence layer. Built-in backends include Redis (default) and PostgreSQL (experimental), with full support for custom implementations.
+Runner-Q uses a trait-based storage abstraction that allows you to swap out the persistence layer. Built-in backends include Redis (default) and PostgreSQL, with full support for custom implementations.
 
 #### Architecture
 
@@ -727,11 +782,9 @@ let engine = WorkerEngine::builder()
     .await?;
 ```
 
-#### PostgreSQL Backend (Experimental)
+#### PostgreSQL Backend
 
-> ⚠️ **IN DEVELOPMENT** - The PostgreSQL backend is feature-gated and experimental. Not recommended for production use yet.
-
-For use cases requiring permanent persistence and SQL-based queries, RunnerQ provides an experimental PostgreSQL backend:
+For use cases requiring permanent persistence and SQL-based queries, RunnerQ provides a PostgreSQL backend:
 
 ```toml
 # Cargo.toml
@@ -772,7 +825,7 @@ let engine = WorkerEngine::builder()
 - `runnerq_results` - Activity execution results
 - `runnerq_idempotency` - Idempotency key mapping
 
-See `examples/postgres_example.rs` for a complete working example.
+See `examples/postgres_example.rs` for a complete working example, and `examples/activity_type_filtering.rs` for workload isolation with multiple engines.
 
 #### Implementing a Custom Backend
 
@@ -803,8 +856,10 @@ impl QueueStorage for MyCustomBackend {
         &self,
         worker_id: &str,
         timeout: Duration,
+        activity_types: Option<&[String]>,
     ) -> Result<Option<DequeuedActivity>, StorageError> {
-        // Implement activity claiming
+        // Implement activity claiming.
+        // When activity_types is Some, only claim matching types.
         todo!()
     }
 
@@ -867,14 +922,15 @@ The storage abstraction consists of two traits:
 
 **`QueueStorage`** - Core queue operations:
 - `enqueue()` - Add activity to the queue
-- `dequeue()` - Claim an activity for processing
+- `dequeue()` - Claim an activity for processing (PostgreSQL picks up due scheduled/retrying activities directly here)
 - `ack_success()` - Mark activity as completed
 - `ack_failure()` - Handle activity failure (retry or dead-letter)
-- `process_scheduled()` - Move due scheduled activities to ready queue
+- `process_scheduled()` - Move due scheduled activities to ready queue (Redis only; PostgreSQL returns `Ok(0)`)
 - `requeue_expired()` - Reclaim activities with expired leases
 - `extend_lease()` - Extend activity processing lease
 - `store_result()` / `get_result()` - Activity result storage
 - `check_idempotency()` - Idempotency key handling
+- `schedules_natively()` - Whether the backend handles scheduling in `dequeue()` (skips the polling loop if `true`)
 
 **`InspectionStorage`** - Observability operations:
 - `stats()` - Get queue statistics

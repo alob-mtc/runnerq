@@ -50,7 +50,7 @@ mod traits;
 #[cfg(feature = "redis")]
 pub mod redis;
 
-// PostgreSQL backend (in development)
+// PostgreSQL backend
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
@@ -84,6 +84,6 @@ pub use traits::{
 #[cfg(feature = "redis")]
 pub use redis::RedisBackend;
 
-// Re-export PostgreSQL backend (in development)
+// Re-export PostgreSQL backend
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresBackend;

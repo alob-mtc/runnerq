@@ -207,10 +207,15 @@ pub trait QueueStorage: ResultStorage + Send + Sync {
     /// Returns `None` if no activities are available within the timeout.
     /// The returned [`DequeuedActivity`] includes a `lease_id` that must be
     /// passed to `ack_success` or `ack_failure`.
+    ///
+    /// When `activity_types` is `Some`, only activities whose `activity_type`
+    /// matches one of the listed values are eligible. When `None`, all types
+    /// are eligible.
     async fn dequeue(
         &self,
         worker_id: &str,
         timeout: std::time::Duration,
+        activity_types: Option<&[String]>,
     ) -> Result<Option<QueuedActivity>, StorageError>;
 
     /// Mark a dequeued activity as successfully completed.
@@ -240,6 +245,11 @@ pub trait QueueStorage: ResultStorage + Send + Sync {
     ///
     /// Should move activities whose `scheduled_at` time has passed to the
     /// ready queue. Returns the number of activities processed.
+    ///
+    /// Backends that handle scheduling natively in [`dequeue()`](Self::dequeue)
+    /// (i.e. [`schedules_natively()`](Self::schedules_natively) returns `true`)
+    /// should return `Ok(0)` here. The worker engine will skip the polling loop
+    /// entirely for such backends.
     async fn process_scheduled(&self) -> Result<u64, StorageError>;
 
     /// Requeue expired leases back to the ready queue.

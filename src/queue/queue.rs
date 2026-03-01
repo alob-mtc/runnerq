@@ -19,7 +19,10 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
     /// Enqueue an activity for processing
     async fn enqueue(&self, activity: Activity) -> Result<(), WorkerError>;
 
-    /// Dequeue the next available activity with timeout
+    /// Dequeue the next available activity with timeout.
+    ///
+    /// Activity type filtering (if configured) is handled internally by the
+    /// adapter — callers do not pass a filter here.
     async fn dequeue(
         &self,
         timeout: Duration,

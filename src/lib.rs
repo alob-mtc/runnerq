@@ -14,6 +14,7 @@
 //! - **Comprehensive error handling** with retryable and non-retryable error types
 //! - **Activity metadata** support for context and tracking
 //! - **Pluggable storage backends** - Redis (default), PostgreSQL, or bring your own
+//! - **Worker-level activity type filtering** - Isolate workloads by restricting engines to specific types
 //! - **Queue statistics** and monitoring capabilities
 //! - **Web-based observability console** for real-time monitoring
 //!
@@ -24,7 +25,7 @@
 //! | Backend | Feature Flag | Status | Description |
 //! |---------|--------------|--------|-------------|
 //! | Redis | (default) | Stable | High-performance with Lua scripts for atomicity |
-//! | PostgreSQL | `postgres` | In Development | Permanent persistence with `FOR UPDATE SKIP LOCKED` |
+//! | PostgreSQL | `postgres` | Stable | Permanent persistence with `FOR UPDATE SKIP LOCKED` |
 //!
 //! ### Using a Custom Backend
 //!
