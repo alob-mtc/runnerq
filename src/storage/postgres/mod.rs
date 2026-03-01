@@ -1,20 +1,15 @@
 //! PostgreSQL Backend for RunnerQ
 //!
-//! ⚠️ **IN DEVELOPMENT - NOT READY FOR PRODUCTION USE** ⚠️
-//!
 //! This module provides a PostgreSQL-based storage backend implementation.
-//! It is currently under active development and the API may change.
 //!
 //! # Status
 //!
 //! - [x] Basic queue operations (enqueue, dequeue, ack)
 //! - [x] Multi-node concurrency with `FOR UPDATE SKIP LOCKED`
+//! - [x] Native scheduling — due activities picked up directly in `dequeue()`
 //! - [x] Idempotency support with separate tracking table
 //! - [x] Event history and observability
 //! - [x] Cross-process events via PostgreSQL LISTEN/NOTIFY
-//! - [ ] Production testing
-//! - [ ] Performance optimization
-//! - [ ] Connection pool tuning
 //!
 //! # Features
 //!
@@ -78,8 +73,6 @@ use crate::storage::{
 // ============================================================================
 
 /// PostgreSQL-based storage backend for RunnerQ.
-///
-/// ⚠️ **IN DEVELOPMENT** - This backend is not yet ready for production use.
 ///
 /// This backend provides:
 /// - **Permanent persistence** - No TTL, records are kept forever
@@ -430,20 +423,27 @@ impl QueueStorage for PostgresBackend {
         &self,
         worker_id: &str,
         _timeout: Duration,
+        activity_types: Option<&[String]>,
     ) -> Result<Option<QueuedActivity>, StorageError> {
         let deadline = Utc::now() + chrono::Duration::milliseconds(self.default_lease_ms);
 
-        // Use FOR UPDATE SKIP LOCKED for safe multi-node dequeue
-        // This atomically claims a job without blocking other workers
+        // Native scheduling: picks up pending, due scheduled, and due retrying
+        // activities in a single query — no separate process_scheduled() loop needed.
+        //
+        // Uses FOR UPDATE SKIP LOCKED for safe multi-node dequeue.
         //
         // Age-weighted fair scheduling:
         // 1. Priority: higher priority activities first
         // 2. Retry boost: activities that have failed more times get priority (avoids starvation)
-        // 3. Age: older activities within same priority/retry get processed first (FIFO)
+        // 3. Effective ready time: COALESCE(scheduled_at, created_at) — orders by when
+        //    the activity first became actionable (created_at for pending, scheduled_at
+        //    for scheduled/retrying)
         //
         // This balances responsiveness (new activities get processed) with fairness
         // (retrying activities eventually complete). Exponential backoff provides
         // natural breathing room while activities wait in scheduled state.
+        //
+        // $6 is the optional activity_types filter. When NULL all types are eligible.
         let result: Option<ActivityRow> = sqlx::query_as(
             r#"
             UPDATE runnerq_activities
@@ -454,12 +454,15 @@ impl QueueStorage for PostgresBackend {
             WHERE id = (
                 SELECT id FROM runnerq_activities
                 WHERE queue_name = $4
-                  AND status = 'pending'
-                  AND (scheduled_at IS NULL OR scheduled_at <= $5)
+                  AND (
+                    status = 'pending'
+                    OR (status IN ('scheduled', 'retrying') AND scheduled_at <= $5)
+                  )
+                  AND ($6::text[] IS NULL OR activity_type = ANY($6))
                 ORDER BY 
                     priority DESC,
                     retry_count DESC,
-                    created_at ASC
+                    COALESCE(scheduled_at, created_at) ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
@@ -471,6 +474,7 @@ impl QueueStorage for PostgresBackend {
         .bind(Utc::now())
         .bind(&self.queue_name)
         .bind(Utc::now())
+        .bind(activity_types.map(|types| types.to_vec()))
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| StorageError::Internal(format!("Failed to dequeue: {}", e)))?;
@@ -750,24 +754,12 @@ impl QueueStorage for PostgresBackend {
     }
 
     async fn process_scheduled(&self) -> Result<u64, StorageError> {
-        let now = Utc::now();
+        // No-op: scheduled/retrying activities are picked up directly in dequeue()
+        Ok(0)
+    }
 
-        let result = sqlx::query(
-            r#"
-            UPDATE runnerq_activities
-            SET status = 'pending', scheduled_at = NULL
-            WHERE queue_name = $1
-              AND status IN ('scheduled', 'retrying')
-              AND scheduled_at <= $2
-            "#,
-        )
-        .bind(&self.queue_name)
-        .bind(now)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Internal(format!("Failed to process scheduled: {}", e)))?;
-
-        Ok(result.rows_affected())
+    fn schedules_natively(&self) -> bool {
+        true
     }
 
     async fn requeue_expired(&self, batch_size: usize) -> Result<u64, StorageError> {
@@ -1447,11 +1439,15 @@ CREATE TABLE IF NOT EXISTS runnerq_activities (
 );
 
 -- Indexes for efficient queries
-CREATE INDEX IF NOT EXISTS idx_runnerq_activities_queue_status
-    ON runnerq_activities(queue_name, status, priority DESC, created_at);
-CREATE INDEX IF NOT EXISTS idx_runnerq_activities_scheduled
-    ON runnerq_activities(queue_name, scheduled_at)
-    WHERE status IN ('scheduled', 'retrying');
+CREATE INDEX IF NOT EXISTS idx_runnerq_dequeue_effective
+    ON runnerq_activities (
+        queue_name,
+        activity_type,
+        priority DESC,
+        retry_count DESC,
+        COALESCE(scheduled_at, created_at) ASC
+    )
+    WHERE status IN ('pending', 'scheduled', 'retrying');
 CREATE INDEX IF NOT EXISTS idx_runnerq_activities_processing
     ON runnerq_activities(queue_name, lease_deadline_ms)
     WHERE status = 'processing';

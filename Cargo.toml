@@ -1,6 +1,6 @@
 [package]
 name = "runner_q"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2021"
 authors = ["Akinlua Bolamigbe bolamigbeakinlua@gmail.com"]
 description = "Redis-based activity queue and worker system"
@@ -38,7 +38,7 @@ bb8-redis = { version = "0.14", optional = true }
 default = ["redis", "axum-ui"]
 # Redis backend (production-ready)
 redis = ["dep:redis", "dep:bb8-redis"]
-# PostgreSQL backend (in development - not recommended for production)
+# PostgreSQL backend
 postgres = ["dep:sqlx", "dep:async-stream"]
 # Axum-based UI endpoints
 axum-ui = ["dep:axum", "dep:tower-http"]

@@ -237,6 +237,7 @@ impl QueueStorage for RedisBackend {
         &self,
         worker_id: &str,
         timeout: Duration,
+        _activity_types: Option<&[String]>,
     ) -> Result<Option<QueuedActivity>, StorageError> {
         queue::dequeue(self, worker_id, timeout).await
     }

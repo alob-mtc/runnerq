@@ -102,7 +102,12 @@ pub struct WorkerConfig {
     /// Interval in seconds for polling scheduled activities.
     ///
     /// When `None`, uses a default interval of 30 seconds.
-    /// Lower values provide more responsive scheduling but increase Redis load.
+    /// Lower values provide more responsive scheduling but increase backend load.
+    ///
+    /// This setting only takes effect for backends that do **not** handle
+    /// scheduling natively in `dequeue()` (e.g. Redis). The PostgreSQL backend
+    /// handles scheduled activities directly in `dequeue()` and skips the
+    /// polling loop entirely.
     ///
     /// # Examples
     ///
@@ -136,6 +141,13 @@ pub struct WorkerConfig {
     /// Maximum number of expired items to requeue per reaper tick
     /// Defaults to 100
     pub reaper_batch_size: Option<usize>,
+
+    /// Optional filter to restrict this engine to specific activity types.
+    ///
+    /// When `Some`, workers will only dequeue activities whose `activity_type`
+    /// matches one of the listed values. When `None` (the default), workers
+    /// dequeue all activity types (catch-all).
+    pub activity_types: Option<Vec<String>>,
 }
 
 impl Default for WorkerConfig {
@@ -148,6 +160,7 @@ impl Default for WorkerConfig {
             lease_ms: Some(60_000),
             reaper_interval_seconds: Some(5),
             reaper_batch_size: Some(100),
+            activity_types: None,
         }
     }
 }
