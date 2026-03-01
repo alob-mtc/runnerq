@@ -2,7 +2,7 @@
 name = "runner_q_redis"
 version = "0.1.0"
 edition = "2021"
-authors = ["Akinlua Bolamigbe bolamigbeakinlua@gmail.com"]
+authors = ["Akinlua Bolamigbe <bolamigbeakinlua@gmail.com>"]
 description = "Redis storage backend for RunnerQ"
 license = "MIT"
 repository = "https://github.com/alob-mtc/runnerq"

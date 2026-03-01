@@ -5,6 +5,9 @@
 //!
 //! # Example
 //!
+//! `RedisBackend::builder().build().await` returns `Result<RedisBackend, runner_q::storage::StorageError>`.
+//! Callers should propagate or handle `StorageError` when using `?`.
+//!
 //! ```rust,ignore
 //! use runner_q::WorkerEngine;
 //! use runner_q_redis::RedisBackend;

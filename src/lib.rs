@@ -25,7 +25,7 @@
 //! | Backend | Feature Flag | Status | Description |
 //! |---------|--------------|--------|-------------|
 //! | PostgreSQL | `postgres` (default) | Stable | Permanent persistence, `FOR UPDATE SKIP LOCKED` |
-//! | Redis | `runner_q_redis` crate | Optional | Use the separate crate for Redis/Valkey |
+//! | Redis | N/A (separate crate) | Optional | Use the `runner_q_redis` crate for Redis/Valkey |
 //!
 //! ### Using a Backend
 //!
@@ -50,7 +50,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use runner_q::{WorkerEngine, ActivityPriority, ActivityHandler, ActivityContext, ActivityHandlerResult, ActivityError};
+//! use runner_q::{WorkerEngine, ActivityPriority, ActivityHandler, ActivityContext, ActivityHandlerResult, ActivityError, storage::PostgresBackend};
 //! use std::sync::Arc;
 //! use async_trait::async_trait;
 //! use serde_json::json;

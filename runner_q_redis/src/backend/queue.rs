@@ -431,7 +431,15 @@ pub async fn dequeue(
             if lease_ms / 1000 < activity.timeout_seconds {
                 let delta = activity.timeout_seconds - (lease_ms / 1000);
                 if delta > 0 {
-                    let _ = extend_lease(backend, activity.id, Duration::from_secs(delta + 10)).await;
+                    match extend_lease(backend, activity.id, Duration::from_secs(delta + 10)).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            warn!(activity_id = %activity.id, "Lease extension skipped; member not found in processing set")
+                        }
+                        Err(e) => {
+                            warn!(activity_id = %activity.id, error = %e, "Failed to extend lease")
+                        }
+                    }
                 }
             }
             debug!(

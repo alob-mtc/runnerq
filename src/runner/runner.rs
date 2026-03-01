@@ -899,7 +899,8 @@ impl WorkerEngine {
 /// # Examples
 ///
 /// ```rust,no_run
-/// use runner_q::WorkerEngine;
+/// use runner_q::{WorkerEngine, storage::PostgresBackend};
+/// use std::sync::Arc;
 /// use std::time::Duration;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {

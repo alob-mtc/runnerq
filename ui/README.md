@@ -117,25 +117,15 @@ The UI receives real-time events for:
 
 #### Usage
 
-```rust
-use runner_q::{runnerq_ui, QueueInspector, WorkerConfig};
-
-let pool = runner_q::runner::redis::create_redis_pool(&redis_url).await?;
-let inspector = QueueInspector::new(pool, queue_name.clone());
-
-// That's it! Real-time updates work automatically
-let app = Router::new().nest("/console", runnerq_ui(inspector));
-```
-
-Or get inspector from WorkerEngine:
+Get an inspector from the engine (built with any backend that implements `InspectionStorage`, e.g. Postgres or Redis via `runner_q_redis`):
 
 ```rust
+let backend = PostgresBackend::new("postgres://localhost/mydb", "my_app").await?;
 let engine = WorkerEngine::builder()
-    .redis_url("redis://localhost:6379")
+    .backend(Arc::new(backend))
     .queue_name("my_app")
     .build()
     .await?;
-
 let inspector = engine.inspector();
 let app = Router::new().nest("/console", runnerq_ui(inspector));
 ```
@@ -143,13 +133,13 @@ let app = Router::new().nest("/console", runnerq_ui(inspector));
 ## Running the Example
 
 ```bash
-# Make sure Redis is running
-redis-server
+# With PostgreSQL: set DATABASE_URL and run the console example
+DATABASE_URL=postgres://localhost/mydb cargo run --example console_ui
 
-# Run the console example
-cargo run --example console_ui
+# With Redis: set REDIS_URL and run the Redis example
+REDIS_URL=redis://127.0.0.1:6379 cargo run --example redis_console_ui
 
-# Open http://localhost:8081/console
+# Open http://localhost:8081/console (or :8082 for redis_console_ui)
 ```
 
 ## Development

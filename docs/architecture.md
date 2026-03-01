@@ -14,8 +14,7 @@ graph TD
     subgraph engine [Worker Engine Internals]
         BQA["BackendQueueAdapter\nActivity ↔ QueuedActivity\nOwns activity_types filter"]
         HR["ActivityHandlerRegistry\nHashMap&lt;String, Arc&lt;dyn ActivityHandler&gt;&gt;"]
-        WL["Worker Loops\n× max_concurrent_activities"]
-        SEM["Semaphore\n(bounded concurrency)"]
+        WL["Worker Loops\n(one per worker, no semaphore)"]
         SP["Scheduled Processor\n(skipped if schedules_natively)"]
         RP["Reaper Processor\n(every 5s, batch 100)"]
         MS["MetricsSink\n(NoopMetrics default)"]
@@ -48,7 +47,6 @@ graph TD
     WE --> SP
     WE --> RP
     WE --> MS
-    WL --> SEM
     BQA --> ST
     ST --> QS
     ST --> IS
@@ -66,7 +64,7 @@ graph TD
 
 ## Module Structure
 
-```
+```text
 src/
 ├── lib.rs                  # Public API surface, re-exports
 ├── config.rs               # WorkerConfig
@@ -104,7 +102,7 @@ graph BT
     queue[queue/queue.rs]
     storage_traits[storage/traits.rs]
     storage_error[storage/error.rs]
-    redis_be[storage/redis/]
+    redis_be[runner_q_redis/]
     postgres_be[storage/postgres/]
     observability[observability/]
     runner[runner/runner.rs]
@@ -170,7 +168,7 @@ stateDiagram-v2
 
 ## Trait Hierarchy
 
-```
+```text
 ResultStorage
 ├── get_result()
 │
@@ -214,11 +212,12 @@ Owns and coordinates all runtime components:
 
 ### WorkerEngineBuilder
 
-Fluent API for constructing a `WorkerEngine`:
+Fluent API for constructing a `WorkerEngine`. You must call `.backend(...)` (e.g. `PostgresBackend::new(...)` or `runner_q_redis::RedisBackend::builder().build().await?`):
 
 ```rust
+let backend = PostgresBackend::new("postgres://localhost/mydb", "my_app").await?;
 WorkerEngine::builder()
-    .redis_url("redis://localhost:6379")   // or .backend(custom)
+    .backend(Arc::new(backend))
     .queue_name("my_app")
     .max_workers(8)
     .activity_types(&["send_email"])       // optional workload filter
@@ -242,30 +241,30 @@ A `HashMap<String, Arc<dyn ActivityHandler>>`. The worker loop looks up a handle
 
 ## Worker Loop
 
+One dedicated loop per worker (no semaphore). Each loop continuously dequeues, executes, and acks:
+
 ```mermaid
 flowchart TD
     START([Worker Loop Start]) --> CHECK{Shutdown?}
     CHECK -->|yes| STOP([Exit])
-    CHECK -->|no| PERMIT{Semaphore\nacquire}
-    PERMIT -->|no permit| SLEEP100[Sleep 100ms] --> CHECK
-    PERMIT -->|acquired| DEQ["dequeue(1s timeout)"]
-    DEQ -->|None| BACKOFF["Backoff sleep\n100ms → 5s"] --> DROP1[Drop permit] --> CHECK
-    DEQ -->|Some activity| LOOKUP{"Handler\nregistry\nlookup"}
-    LOOKUP -->|not found| WARN[Log warning] --> DROP2[Drop permit] --> CHECK
-    LOOKUP -->|found| EXEC["tokio::time::timeout(\nactivity.timeout,\nhandler.handle(payload, ctx)\n)"]
-    EXEC -->|Ok Ok value| ACK_OK["mark_completed\nstore_result"] --> DROP3[Drop permit] --> CHECK
-    EXEC -->|Ok Err Retry| ACK_RETRY["mark_failed\n(retryable=true)"]
-    ACK_RETRY -->|dead lettered| DLQ["on_dead_letter\ncallback"] --> DROP4[Drop permit] --> CHECK
-    ACK_RETRY -->|retrying| DROP5[Drop permit] --> CHECK
-    EXEC -->|Ok Err NonRetry| ACK_FAIL["mark_failed\n(retryable=false)\nstore_result Err"] --> DROP6[Drop permit] --> CHECK
-    EXEC -->|Err timeout| ACK_TO["mark_failed\n(retryable=true)"]
-    ACK_TO -->|dead lettered| DLQ2["on_dead_letter"] --> DROP7[Drop permit] --> CHECK
-    ACK_TO -->|retrying| DROP8[Drop permit] --> CHECK
+    CHECK -->|no| DEQ["dequeue(1s timeout)"]
+    DEQ -->|None| BACKOFF["Backoff sleep 100ms to 5s"] --> CHECK
+    DEQ -->|Some activity| LOOKUP{"Handler registry lookup"}
+    LOOKUP -->|not found| WARN[Log warning] --> CHECK
+    LOOKUP -->|found| EXEC["tokio::time::timeout(activity.timeout, handler.handle)"]
+    EXEC -->|Ok Ok value| ACK_OK["mark_completed, store_result"] --> CHECK
+    EXEC -->|Ok Err Retry| ACK_RETRY["mark_failed retryable"]
+    ACK_RETRY -->|dead lettered| DLQ["on_dead_letter callback"] --> CHECK
+    ACK_RETRY -->|retrying| CHECK
+    EXEC -->|Ok Err NonRetry| ACK_FAIL["mark_failed non-retryable"] --> CHECK
+    EXEC -->|Err timeout| ACK_TO["mark_failed retryable"]
+    ACK_TO -->|dead lettered| DLQ2["on_dead_letter"] --> CHECK
+    ACK_TO -->|retrying| CHECK
 ```
 
 ### Concurrency control
 
-A `tokio::sync::Semaphore` with `max_concurrent_activities` permits bounds how many activities execute in parallel. Each worker loop acquires a permit before dequeuing and drops it after ack.
+`max_concurrent_activities` worker tasks are spawned; each runs a single loop that dequeues one activity at a time, executes it, then loops again. Concurrency is thus bounded by the number of worker loops, not a semaphore.
 
 ### Backoff on idle
 
