@@ -285,7 +285,7 @@
                 overflow: hidden;
                 opacity: 0;
                 animation: statsCardEnter 0.5s ease forwards;
-                animation-delay: calc(0.05s * var(--i, 0));
+                animation-delay: min(calc(0.05s * var(--i, 0)), 0.5s);
             }
 
             .stats-card::before {
@@ -2838,7 +2838,7 @@
                     .map(
                         (activity, index) => `
                 <tr class="${selectedActivityId === activity.id ? "selected" : ""}"
-                    style="animation-delay: ${0.02 * index}s"
+                    style="animation-delay: ${Math.min(0.02 * index, 0.5)}s"
                     data-activity-id="${escapeHtml(activity.id)}"
                     onclick="selectActivity(this.dataset.activityId)">
                     <td>
@@ -3694,10 +3694,14 @@
                     card.style.setProperty("--i", String(i));
                 });
 
-                // Tabs sliding indicator position
+                // Tabs sliding indicator position (re-run after load and fonts so widths are correct)
                 if (typeof updateTabsIndicator === "function") {
                     requestAnimationFrame(() => updateTabsIndicator());
                     window.addEventListener("resize", updateTabsIndicator);
+                    window.addEventListener("load", () => updateTabsIndicator());
+                    if (document.fonts && document.fonts.ready) {
+                        document.fonts.ready.then(() => updateTabsIndicator());
+                    }
                 }
 
                 // Setup theme toggle

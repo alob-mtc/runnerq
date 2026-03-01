@@ -59,7 +59,7 @@ use serde_json::{json, Value};
 use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
 use sqlx::FromRow;
 use sqlx::Transaction;
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::activity::activity::{ActivityPriority, ActivityStatus};
@@ -241,24 +241,40 @@ impl PostgresBackend {
         .await
         .map_err(|e| StorageError::Internal(format!("Failed to record event: {}", e)))?;
 
-        // Broadcast via PostgreSQL NOTIFY (cross-process!)
-        // This allows UI running in a separate process to receive real-time events
+        // Broadcast via PostgreSQL NOTIFY (cross-process!). Payload truncated if > ~8KB to avoid transaction abort.
         let channel = self.notification_channel();
-        let payload = serde_json::to_string(&event)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-
-        // Escape single quotes in payload for SQL
-        let escaped_payload = payload.replace('\'', "''");
-
-        // Quote the channel name as a PostgreSQL identifier (double-quote and escape any internal double-quotes)
-        let quoted_channel = Self::quote_identifier(&channel);
-
-        sqlx::query(&format!("NOTIFY {}, '{}'", quoted_channel, escaped_payload))
+        let payload = self.prepare_notify_payload(&event)?;
+        sqlx::query("SELECT pg_notify($1::text, $2::text)")
+            .bind(&channel)
+            .bind(&payload)
             .execute(&self.pool)
             .await
             .map_err(|e| StorageError::Internal(format!("Failed to notify: {}", e)))?;
 
         Ok(())
+    }
+
+    /// Build NOTIFY payload; truncate to safe size if over PostgreSQL's ~8KB limit.
+    fn prepare_notify_payload(&self, event: &ActivityEvent) -> Result<String, StorageError> {
+        const NOTIFY_PAYLOAD_MAX: usize = 7900;
+        let payload = serde_json::to_string(event)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        if payload.len() > NOTIFY_PAYLOAD_MAX {
+            warn!(
+                activity_id = %event.activity_id,
+                len = payload.len(),
+                "NOTIFY payload truncated to avoid PostgreSQL limit"
+            );
+            let truncated = json!({
+                "activity_id": event.activity_id,
+                "event_type": serde_json::to_string(&event.event_type).unwrap_or_default(),
+                "truncated": true,
+            });
+            serde_json::to_string(&truncated)
+                .map_err(|e| StorageError::Serialization(e.to_string()))
+        } else {
+            Ok(payload)
+        }
     }
 
     /// Record an activity event within an existing transaction.
@@ -297,11 +313,10 @@ impl PostgresBackend {
         .map_err(|e| StorageError::Internal(format!("Failed to record event: {}", e)))?;
 
         let channel = self.notification_channel();
-        let payload = serde_json::to_string(&event)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        let escaped_payload = payload.replace('\'', "''");
-        let quoted_channel = Self::quote_identifier(&channel);
-        sqlx::query(&format!("NOTIFY {}, '{}'", quoted_channel, escaped_payload))
+        let payload = self.prepare_notify_payload(&event)?;
+        sqlx::query("SELECT pg_notify($1::text, $2::text)")
+            .bind(&channel)
+            .bind(&payload)
             .execute(&mut **tx)
             .await
             .map_err(|e| StorageError::Internal(format!("Failed to notify: {}", e)))?;
@@ -601,12 +616,15 @@ impl QueueStorage for PostgresBackend {
         let default_lease_secs = (self.default_lease_ms / 1000) as u64;
         if default_lease_secs < activity.timeout_seconds {
             let additional_secs = activity.timeout_seconds - default_lease_secs;
-            let _ = self
-                .extend_lease(
-                    activity.id,
-                    Duration::from_secs(additional_secs + 10),
-                )
-                .await;
+            let extend_by = Duration::from_secs(additional_secs + 10);
+            if let Err(e) = self.extend_lease(activity.id, extend_by).await {
+                tracing::warn!(
+                    activity_id = %activity.id,
+                    extend_by_secs = extend_by.as_secs(),
+                    error = %e,
+                    "Failed to extend lease for long-running activity"
+                );
+            }
         }
 
         debug!(
@@ -633,6 +651,7 @@ impl QueueStorage for PostgresBackend {
             .await
             .map_err(|e| StorageError::Internal(format!("Failed to begin transaction: {}", e)))?;
 
+        // Only update if activity is still processing and claimed by this worker (avoids orphan results/events).
         let activity_type: Option<(String,)> = sqlx::query_as(
             r#"
             UPDATE runnerq_activities
@@ -642,6 +661,8 @@ impl QueueStorage for PostgresBackend {
                 current_worker_id = NULL,
                 lease_deadline_ms = NULL
             WHERE id = $3 AND queue_name = $4
+              AND status = 'processing'
+              AND current_worker_id = $2
             RETURNING activity_type
             "#,
         )
@@ -653,6 +674,17 @@ impl QueueStorage for PostgresBackend {
         .await
         .map_err(|e| StorageError::Internal(format!("Failed to ack success: {}", e)))?;
 
+        let activity_type_str = activity_type
+            .as_ref()
+            .map(|t| t.0.as_str())
+            .unwrap_or("");
+        if activity_type.is_none() {
+            return Err(StorageError::NotFound(format!(
+                "Activity {} is not in a claimable state for ack_success (not found or not claimed by this worker)",
+                activity_id
+            )));
+        }
+
         if let Some(ref data) = result {
             let activity_result = ActivityResult {
                 data: Some(data.clone()),
@@ -663,10 +695,6 @@ impl QueueStorage for PostgresBackend {
         }
 
         // Single merged event: Completed. Result payload lives in runnerq_results; event only signals result_stored.
-        let activity_type_str = activity_type
-            .as_ref()
-            .map(|t| t.0.as_str())
-            .unwrap_or("");
         let mut detail = json!({ "activity_type": activity_type_str });
         if result.is_some() {
             if let Some(obj) = detail.as_object_mut() {
@@ -703,33 +731,35 @@ impl QueueStorage for PostgresBackend {
             FailureKind::Timeout => ("Activity execution timed out".to_string(), true),
         };
 
-        // Get current activity state
-        let activity: Option<ActivityRow> =
-            sqlx::query_as(r#"SELECT * FROM runnerq_activities WHERE id = $1 AND queue_name = $2"#)
-                .bind(activity_id)
-                .bind(&self.queue_name)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| StorageError::Internal(format!("Failed to get activity: {}", e)))?;
+        // Single transaction: lock row, decide retry/DLQ/failed, then update (avoids TOCTOU).
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Internal(format!("Failed to begin transaction: {}", e)))?;
 
-        let activity = match activity {
-            Some(a) => a,
-            None => {
-                return Err(StorageError::NotFound(format!(
-                    "Activity {} not found",
-                    activity_id
-                )))
-            }
-        };
+        let activity: ActivityRow = sqlx::query_as(
+            r#"
+            SELECT * FROM runnerq_activities
+            WHERE id = $1 AND queue_name = $2 AND status = 'processing' AND current_worker_id = $3
+            FOR UPDATE
+            "#,
+        )
+        .bind(activity_id)
+        .bind(&self.queue_name)
+        .bind(worker_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Internal(format!("Failed to lock activity: {}", e)))?
+        .ok_or_else(|| {
+            StorageError::NotFound(format!(
+                "Activity {} not found or not claimed by this worker",
+                activity_id
+            ))
+        })?;
 
         // Non-retryable failures go straight to Failed status (not DLQ)
         if !retryable {
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(|e| StorageError::Internal(format!("Failed to begin transaction: {}", e)))?;
-
             sqlx::query(
                 r#"
                 UPDATE runnerq_activities
@@ -740,7 +770,7 @@ impl QueueStorage for PostgresBackend {
                     last_worker_id = $4,
                     current_worker_id = NULL,
                     lease_deadline_ms = NULL
-                WHERE id = $5
+                WHERE id = $5 AND queue_name = $6 AND status = 'processing' AND current_worker_id = $4
                 "#,
             )
             .bind(now)
@@ -748,6 +778,7 @@ impl QueueStorage for PostgresBackend {
             .bind(now)
             .bind(worker_id)
             .bind(activity_id)
+            .bind(&self.queue_name)
             .execute(&mut *tx)
             .await
             .map_err(|e| StorageError::Internal(format!("Failed to mark as failed: {}", e)))?;
@@ -773,8 +804,7 @@ impl QueueStorage for PostgresBackend {
             return Ok(false);
         }
 
-        // Check if we can retry: max_retries == 0 means infinite retries
-        // Use retry_count + 1 < max_retries to match Redis behavior
+        // Check if we can retry (decision uses locked row state)
         let can_retry = activity.max_retries == 0
             || (activity.retry_count as u32 + 1) < (activity.max_retries as u32);
 
@@ -783,12 +813,7 @@ impl QueueStorage for PostgresBackend {
             let backoff_multiplier = 2_i64.pow(activity.retry_count as u32 + 1);
             let retry_delay = base_delay * backoff_multiplier;
             let scheduled_at = now + chrono::Duration::seconds(retry_delay);
-
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(|e| StorageError::Internal(format!("Failed to begin transaction: {}", e)))?;
+            let new_retry_count = activity.retry_count + 1;
 
             sqlx::query(
                 r#"
@@ -801,7 +826,7 @@ impl QueueStorage for PostgresBackend {
                     last_worker_id = $4,
                     current_worker_id = NULL,
                     lease_deadline_ms = NULL
-                WHERE id = $5
+                WHERE id = $5 AND queue_name = $6 AND status = 'processing' AND current_worker_id = $4
                 "#,
             )
             .bind(scheduled_at)
@@ -809,6 +834,7 @@ impl QueueStorage for PostgresBackend {
             .bind(now)
             .bind(worker_id)
             .bind(activity_id)
+            .bind(&self.queue_name)
             .execute(&mut *tx)
             .await
             .map_err(|e| StorageError::Internal(format!("Failed to schedule retry: {}", e)))?;
@@ -819,7 +845,7 @@ impl QueueStorage for PostgresBackend {
                 ActivityEventType::Retrying,
                 Some(worker_id),
                 Some(json!({
-                    "retry_count": activity.retry_count + 1,
+                    "retry_count": new_retry_count,
                     "scheduled_at": scheduled_at,
                     "error": error_message
                 })),
@@ -833,12 +859,6 @@ impl QueueStorage for PostgresBackend {
         }
 
         // Move to dead letter queue - exhausted all retries
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| StorageError::Internal(format!("Failed to begin transaction: {}", e)))?;
-
         sqlx::query(
             r#"
             UPDATE runnerq_activities
@@ -849,7 +869,7 @@ impl QueueStorage for PostgresBackend {
                 last_worker_id = $4,
                 current_worker_id = NULL,
                 lease_deadline_ms = NULL
-            WHERE id = $5
+            WHERE id = $5 AND queue_name = $6 AND status = 'processing' AND current_worker_id = $4
             "#,
         )
         .bind(now)
@@ -857,6 +877,7 @@ impl QueueStorage for PostgresBackend {
         .bind(now)
         .bind(worker_id)
         .bind(activity_id)
+        .bind(&self.queue_name)
         .execute(&mut *tx)
         .await
         .map_err(|e| StorageError::Internal(format!("Failed to move to DLQ: {}", e)))?;
