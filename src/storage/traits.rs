@@ -274,6 +274,17 @@ pub trait QueueStorage: ResultStorage + Send + Sync {
         &self,
         activity: &QueuedActivity,
     ) -> Result<Option<Uuid>, StorageError>;
+
+    /// Whether this backend handles scheduled activities natively in `dequeue()`.
+    ///
+    /// When `true`, the worker engine will not start the scheduled-activities
+    /// processor loop, since `dequeue()` already picks up due scheduled and
+    /// retrying activities directly.
+    ///
+    /// Defaults to `false` (the processor loop is started).
+    fn schedules_natively(&self) -> bool {
+        false
+    }
 }
 
 // ============================================================================

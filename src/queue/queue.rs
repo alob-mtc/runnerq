@@ -85,6 +85,11 @@ pub(crate) trait ActivityQueueTrait: Send + Sync {
         &self,
         activity_id: uuid::Uuid,
     ) -> Result<Option<ActivityResult>, WorkerError>;
+
+    /// Whether the backend handles scheduled activities natively in dequeue().
+    fn schedules_natively(&self) -> bool {
+        false
+    }
 }
 
 /// State of an activity result.

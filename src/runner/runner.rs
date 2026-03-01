@@ -379,9 +379,11 @@ impl WorkerEngine {
         let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent_activities));
         let mut join_handles = Vec::new();
 
-        // Scheduled activities processor
-        let scheduled_handle = self.start_scheduled_activities_processor().await;
-        join_handles.push(scheduled_handle);
+        // Scheduled activities processor (skipped if backend handles it in dequeue)
+        if !self.activity_queue.schedules_natively() {
+            let scheduled_handle = self.start_scheduled_activities_processor().await;
+            join_handles.push(scheduled_handle);
+        }
 
         // Reaper processor for re-queueing expired processing items
         let reaper_handle = self.start_reaper_processor().await;
@@ -1772,5 +1774,9 @@ impl ActivityQueueTrait for BackendQueueAdapter {
             })),
             None => Ok(None),
         }
+    }
+
+    fn schedules_natively(&self) -> bool {
+        self.backend.schedules_natively()
     }
 }

@@ -454,12 +454,14 @@ impl QueueStorage for PostgresBackend {
             WHERE id = (
                 SELECT id FROM runnerq_activities
                 WHERE queue_name = $4
-                  AND status = 'pending'
-                  AND (scheduled_at IS NULL OR scheduled_at <= $5)
+                  AND (
+                    status = 'pending'
+                    OR (status IN ('scheduled', 'retrying') AND scheduled_at <= $5)
+                  )
                 ORDER BY 
                     priority DESC,
                     retry_count DESC,
-                    created_at ASC
+                    COALESCE(scheduled_at, created_at) ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
@@ -750,24 +752,12 @@ impl QueueStorage for PostgresBackend {
     }
 
     async fn process_scheduled(&self) -> Result<u64, StorageError> {
-        let now = Utc::now();
+        // No-op: scheduled/retrying activities are picked up directly in dequeue()
+        Ok(0)
+    }
 
-        let result = sqlx::query(
-            r#"
-            UPDATE runnerq_activities
-            SET status = 'pending', scheduled_at = NULL
-            WHERE queue_name = $1
-              AND status IN ('scheduled', 'retrying')
-              AND scheduled_at <= $2
-            "#,
-        )
-        .bind(&self.queue_name)
-        .bind(now)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Internal(format!("Failed to process scheduled: {}", e)))?;
-
-        Ok(result.rows_affected())
+    fn schedules_natively(&self) -> bool {
+        true
     }
 
     async fn requeue_expired(&self, batch_size: usize) -> Result<u64, StorageError> {
@@ -1447,11 +1437,14 @@ CREATE TABLE IF NOT EXISTS runnerq_activities (
 );
 
 -- Indexes for efficient queries
-CREATE INDEX IF NOT EXISTS idx_runnerq_activities_queue_status
-    ON runnerq_activities(queue_name, status, priority DESC, created_at);
-CREATE INDEX IF NOT EXISTS idx_runnerq_activities_scheduled
-    ON runnerq_activities(queue_name, scheduled_at)
-    WHERE status IN ('scheduled', 'retrying');
+CREATE INDEX IF NOT EXISTS idx_runnerq_dequeue_effective
+    ON runnerq_activities (
+        queue_name,
+        priority DESC,
+        retry_count DESC,
+        COALESCE(scheduled_at, created_at) ASC
+    )
+    WHERE status IN ('pending', 'scheduled', 'retrying');
 CREATE INDEX IF NOT EXISTS idx_runnerq_activities_processing
     ON runnerq_activities(queue_name, lease_deadline_ms)
     WHERE status = 'processing';
