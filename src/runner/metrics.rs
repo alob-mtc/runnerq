@@ -7,6 +7,7 @@ pub const ACTIVITY_FAILED_NON_RETRY: &str   = "runnerq_activity_failed_non_retry
 pub const ACTIVITY_TIMEOUT: &str            = "runnerq_activity_timeout_total";
 pub const ACTIVITY_DEAD_LETTERED: &str      = "runnerq_activity_dead_lettered_total";
 pub const ACTIVITY_PANIC: &str              = "runnerq_activity_panic_total";
+pub const ACTIVITY_HANDLER_NOT_FOUND: &str  = "runnerq_activity_handler_not_found_total";
 
 // Queue / storage error paths
 pub const ACTIVITY_ENQUEUE_ERROR: &str      = "runnerq_activity_enqueue_error_total";

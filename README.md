@@ -4,7 +4,7 @@ A robust, scalable activity queue and worker system for Rust applications with p
 
 ## Features
 
-- **Pluggable backend system** - Trait-based storage abstraction supporting Redis, PostgreSQL, Valkey, and custom backends
+- **Pluggable backend system** - Trait-based storage abstraction; PostgreSQL is built-in; Redis available via the `runner_q_redis` crate
 - **Priority-based activity processing** - Support for Critical, High, Normal, and Low priority levels
 - **Activity scheduling** - Precise timestamp-based scheduling for future execution
 - **Intelligent retry mechanism** - Built-in retry mechanism with exponential backoff
@@ -22,9 +22,8 @@ A robust, scalable activity queue and worker system for Rust applications with p
 
 | Backend | Status | Use Case |
 |---------|--------|----------|
-| **Redis** | ✅ Stable | Default. High-performance, ephemeral storage with TTL |
-| **Valkey** | ✅ Stable | Redis-compatible, drop-in replacement |
-| **PostgreSQL** | ✅ Stable | Permanent persistence, SQL-based queries |
+| **PostgreSQL** | ✅ Built-in | Default. Permanent persistence, SQL-based queries |
+| **Redis** | ✅ Optional | Use the `runner_q_redis` crate for Redis or Valkey |
 | **Custom** | ✅ Supported | Implement `Storage` trait for your own backend |
 
 ## Installation
@@ -98,9 +97,10 @@ pub struct EmailResult {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Improved API: Builder pattern for WorkerEngine
+    use runner_q::storage::PostgresBackend;
+    let backend = PostgresBackend::new("postgres://localhost/mydb", "my_app").await?;
     let engine = WorkerEngine::builder()
-        .redis_url("redis://localhost:6379")
+        .backend(std::sync::Arc::new(backend))
         .queue_name("my_app")
         .max_workers(8)
         .schedule_poll_interval(Duration::from_secs(30))
@@ -709,6 +709,8 @@ let engine = WorkerEngine::builder()
 Runner-Q uses a trait-based storage abstraction that allows you to swap out the persistence layer. Built-in backends include Redis (default) and PostgreSQL, with full support for custom implementations.
 
 #### Architecture
+
+For a comprehensive deep-dive into RunnerQ's internals — trait hierarchy, worker loop, state machine, backend comparison, and more — see [`docs/architecture.md`](docs/architecture.md).
 
 ```mermaid
 graph TD

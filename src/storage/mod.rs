@@ -1,8 +1,8 @@
 //! Backend abstraction layer for RunnerQ.
 //!
 //! This module provides traits and implementations for different storage backends.
-//! The default backend is Redis, but the abstraction allows for other implementations
-//! such as Valkey, Kafka, or SQL-based backends.
+//! The built-in backend is PostgreSQL; you can also use the `runner_q_redis` crate
+//! or implement the storage traits for custom backends.
 //!
 //! # Architecture
 //!
@@ -30,14 +30,15 @@
 //!     .await?;
 //! ```
 //!
-//! # Using the Default Redis Backend
+//! # Using the PostgreSQL backend
 //!
 //! ```rust,ignore
-//! use runner_q::WorkerEngine;
+//! use runner_q::{WorkerEngine, storage::PostgresBackend};
+//! use std::sync::Arc;
 //!
-//! // Redis backend is used by default when you specify redis_url
+//! let backend = PostgresBackend::new("postgres://localhost/mydb", "my_app").await?;
 //! let engine = WorkerEngine::builder()
-//!     .redis_url("redis://localhost:6379")
+//!     .backend(Arc::new(backend))
 //!     .queue_name("my_app")
 //!     .build()
 //!     .await?;
@@ -45,10 +46,6 @@
 
 mod error;
 mod traits;
-
-// Redis backend
-#[cfg(feature = "redis")]
-pub mod redis;
 
 // PostgreSQL backend
 #[cfg(feature = "postgres")]
@@ -79,10 +76,6 @@ pub use traits::{
     // Traits
     Storage,
 };
-
-// Re-export Redis backend
-#[cfg(feature = "redis")]
-pub use redis::RedisBackend;
 
 // Re-export PostgreSQL backend
 #[cfg(feature = "postgres")]

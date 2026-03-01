@@ -1,9 +1,19 @@
+//! Example: RunnerQ with Redis backend and Console UI.
+//!
+//! Uses the `runner_q_redis` crate for storage and the same observability UI as the
+//! Postgres example. Requires a running Redis (or Valkey) instance.
+//!
+//! Run with:
+//!   cargo run --example redis_console_ui
+//!
+//! Optionally set REDIS_URL (default: redis://127.0.0.1:6379).
+
 use async_trait::async_trait;
 use axum::{serve, Router};
 use runner_q::{
-    runnerq_ui, storage::PostgresBackend, ActivityContext, ActivityHandler, ActivityHandlerResult,
-    WorkerEngine,
+    runnerq_ui, ActivityContext, ActivityHandler, ActivityHandlerResult, WorkerEngine,
 };
+use runner_q_redis::RedisBackend;
 use std::{sync::Arc, time::Duration};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -28,18 +38,17 @@ impl ActivityHandler for TestActivity {
     }
 }
 
-/// Example showing how to serve the RunnerQ Console UI with real-time updates
-///
-/// This example demonstrates the simplest way to add observability to your RunnerQ instance.
-/// The UI will be available at http://localhost:8081/console with real-time SSE updates.
-///
-/// Event streaming is automatically enabled internally - no configuration required!
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:runnerq@localhost:5432/runnerq".to_string());
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
-    let backend = PostgresBackend::new(&database_url, "my_app").await?;
+    let backend = RedisBackend::builder()
+        .redis_url(&redis_url)
+        .queue_name("my_app")
+        .build()
+        .await?;
+
     let mut engine = WorkerEngine::builder()
         .backend(Arc::new(backend))
         .queue_name("my_app")
@@ -47,28 +56,22 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .await?;
 
-    // Register test activity handler
     engine.register_activity("test_activity".to_string(), Arc::new(TestActivity));
 
-    // Get inspector from engine - event streaming is auto-enabled
     let inspector = engine.inspector();
-
-    // Clone executor for background task
     let executor = engine.get_activity_executor();
 
-    // Start worker engine in background
     let engine_clone = Arc::new(engine);
     let engine_handle = {
         let engine = engine_clone.clone();
         tokio::spawn(async move {
-            println!("🚀 Worker engine starting...");
+            println!("🚀 Worker engine starting (Redis backend)...");
             if let Err(e) = engine.start().await {
                 eprintln!("❌ Worker engine error: {}", e);
             }
         })
     };
 
-    // Enqueue test activities periodically
     tokio::spawn(async move {
         println!("⏳ Waiting 3 seconds before first test activity...");
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -106,15 +109,14 @@ async fn main() -> anyhow::Result<()> {
             .allow_headers(Any),
     );
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8081").await?;
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8083").await?;
     let bound_addr = listener.local_addr()?;
 
-    println!("✨ RunnerQ Console: http://{}/console", bound_addr);
-    println!("   Real-time updates enabled via SSE");
-    println!("   Press Ctrl+C to stop");
+    println!("✨ RunnerQ Console (Redis): http://{}/console", bound_addr);
+    println!("   Backend: Redis @ {}", redis_url);
+    println!("   Real-time updates via SSE — Press Ctrl+C to stop");
 
     serve(listener, app).await?;
-    // Cleanup
     engine_handle.abort();
     Ok(())
 }

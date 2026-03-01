@@ -1344,16 +1344,15 @@ dependencies = [
 
 [[package]]
 name = "runner_q"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
  "axum",
- "bb8-redis",
  "chrono",
  "futures",
- "redis",
+ "runner_q_redis",
  "serde",
  "serde_json",
  "sqlx",
@@ -1364,6 +1363,23 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "runner_q_redis"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bb8-redis",
+ "chrono",
+ "futures",
+ "redis",
+ "runner_q",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

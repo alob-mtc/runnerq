@@ -1,42 +1,4 @@
 //! Redis backend implementation for RunnerQ.
-//!
-//! This module provides a Redis-based implementation of the [`Storage`] trait,
-//! which is the default backend for RunnerQ.
-//!
-//! # Features
-//!
-//! - Priority-based queue using Redis sorted sets
-//! - Lease-based activity claiming with automatic expiration
-//! - Scheduled activity support using sorted sets
-//! - Dead letter queue for failed activities
-//! - Real-time event streaming via Redis Streams
-//! - Activity snapshots for observability
-//!
-//! # Usage
-//!
-//! ```rust,ignore
-//! use runner_q::storage::RedisBackend;
-//! use runner_q::WorkerEngine;
-//! use std::sync::Arc;
-//!
-//! // Create Redis backend with custom configuration
-//! let backend = RedisBackend::builder()
-//!     .redis_url("redis://localhost:6379")
-//!     .queue_name("my_app")
-//!     .build()
-//!     .await?;
-//!
-//! let engine = WorkerEngine::builder()
-//!     .backend(Arc::new(backend))
-//!     .max_workers(8)
-//!     .build()
-//!     .await?;
-//! ```
-//!
-//! # Valkey Compatibility
-//!
-//! Since Valkey is Redis-compatible, this backend works with Valkey servers
-//! by simply pointing the URL to a Valkey instance.
 
 mod inspection;
 mod pool;
@@ -44,21 +6,24 @@ mod queue;
 
 use std::time::Duration;
 
+/// Maps `redis::RedisError` to `StorageError` (runner_q_redis owns this conversion).
+pub(crate) fn redis_to_storage(e: redis::RedisError) -> StorageError {
+    StorageError::Unavailable(e.to_string())
+}
+
+use async_trait::async_trait;
 use bb8_redis::{bb8::Pool, RedisConnectionManager};
+use futures::stream::BoxStream;
+use runner_q::storage::{
+    ActivityEvent, ActivityResult, ActivitySnapshot, DeadLetterRecord, FailureKind,
+    InspectionStorage, QueueStats, QueueStorage, QueuedActivity, ResultStorage, StorageError,
+};
+use uuid::Uuid;
 
 pub use pool::RedisConfig;
 pub use pool::{create_redis_pool, create_redis_pool_with_config};
 
-use super::error::StorageError;
-use super::traits::*;
-use async_trait::async_trait;
-use futures::stream::BoxStream;
-use uuid::Uuid;
-
 /// Redis-based backend for RunnerQ.
-///
-/// This struct provides a complete implementation of both [`QueueStorage`]
-/// and [`InspectionStorage`] using Redis as the storage layer.
 #[derive(Clone)]
 pub struct RedisBackend {
     pool: Pool<RedisConnectionManager>,
@@ -72,7 +37,7 @@ impl RedisBackend {
         Self {
             pool,
             queue_name,
-            default_lease_ms: 60_000, // 60 seconds default lease
+            default_lease_ms: 60_000,
         }
     }
 
@@ -102,7 +67,6 @@ impl RedisBackend {
         self.default_lease_ms
     }
 
-    // Key helpers
     fn main_queue_key(&self) -> String {
         format!("{}:priority_queue", self.queue_name)
     }
@@ -153,7 +117,6 @@ pub struct RedisBackendBuilder {
 }
 
 impl RedisBackendBuilder {
-    /// Create a new builder with default values.
     pub fn new() -> Self {
         Self {
             redis_url: None,
@@ -163,31 +126,26 @@ impl RedisBackendBuilder {
         }
     }
 
-    /// Set the Redis URL.
     pub fn redis_url(mut self, url: impl Into<String>) -> Self {
         self.redis_url = Some(url.into());
         self
     }
 
-    /// Set the queue name (used as key prefix).
     pub fn queue_name(mut self, name: impl Into<String>) -> Self {
         self.queue_name = Some(name.into());
         self
     }
 
-    /// Set the Redis pool configuration.
     pub fn config(mut self, config: RedisConfig) -> Self {
         self.config = Some(config);
         self
     }
 
-    /// Set the default lease duration in milliseconds.
     pub fn lease_ms(mut self, ms: u64) -> Self {
         self.lease_ms = Some(ms);
         self
     }
 
-    /// Build the Redis backend.
     pub async fn build(self) -> Result<RedisBackend, StorageError> {
         let redis_url = self
             .redis_url
@@ -212,20 +170,12 @@ impl Default for RedisBackendBuilder {
     }
 }
 
-// ============================================================================
-// ResultStorage Implementation
-// ============================================================================
-
 #[async_trait]
 impl ResultStorage for RedisBackend {
     async fn get_result(&self, activity_id: Uuid) -> Result<Option<ActivityResult>, StorageError> {
         queue::get_result(self, activity_id).await
     }
 }
-
-// ============================================================================
-// QueueStorage Implementation
-// ============================================================================
 
 #[async_trait]
 impl QueueStorage for RedisBackend {
@@ -291,10 +241,6 @@ impl QueueStorage for RedisBackend {
         queue::check_idempotency(self, activity).await
     }
 }
-
-// ============================================================================
-// InspectionStorage Implementation
-// ============================================================================
 
 #[async_trait]
 impl InspectionStorage for RedisBackend {

@@ -5,7 +5,7 @@ use bb8_redis::RedisConnectionManager;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::storage::StorageError;
+use runner_q::storage::StorageError;
 
 /// Configuration for Redis connection pool.
 #[derive(Debug, Clone, Copy)]

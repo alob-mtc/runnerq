@@ -6,7 +6,7 @@
 //! - [`DeadLetterRecord`]: Dead letter queue records
 //! - UI components for web-based monitoring (with `axum-ui` feature)
 
-#[cfg(any(feature = "redis", feature = "postgres"))]
+#[cfg(feature = "postgres")]
 pub mod inspector;
 mod models;
 pub mod ui;
@@ -17,12 +17,12 @@ pub use models::{
 };
 
 // Re-export inspector (requires a backend feature)
-#[cfg(any(feature = "redis", feature = "postgres"))]
+#[cfg(feature = "postgres")]
 pub use inspector::QueueInspector;
 
 // Re-export static HTML for custom integrations
 pub use ui::CONSOLE_HTML;
 
 // Re-export UI routes (requires axum-ui feature and a backend)
-#[cfg(all(feature = "axum-ui", any(feature = "redis", feature = "postgres")))]
+#[cfg(all(feature = "axum-ui", feature = "postgres"))]
 pub use ui::{observability_api, runnerq_ui};

@@ -19,12 +19,12 @@
 
 mod html;
 
-#[cfg(all(feature = "axum-ui", any(feature = "redis", feature = "postgres")))]
+#[cfg(all(feature = "axum-ui", feature = "postgres"))]
 mod axum;
 
 // Re-export HTML for custom integrations
 pub use html::CONSOLE_HTML;
 
 // Re-export framework-specific implementations
-#[cfg(all(feature = "axum-ui", any(feature = "redis", feature = "postgres")))]
+#[cfg(all(feature = "axum-ui", feature = "postgres"))]
 pub use self::axum::{observability_api, runnerq_ui};
