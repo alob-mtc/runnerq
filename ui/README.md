@@ -25,28 +25,25 @@ The `runnerq-console.html` is a self-contained, single-page HTML file that provi
 Simply use the provided Rust helper functions to serve the UI:
 
 ```rust
-use runner_q::{runnerq_ui, QueueInspector, WorkerConfig};
+use runner_q::{runnerq_ui, storage::PostgresBackend, WorkerEngine};
 use axum::{serve, Router};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cfg = WorkerConfig {
-        queue_name: "my_app".to_string(),
-        redis_url: "redis://127.0.0.1:6379".to_string(),
-        max_concurrent_activities: 10,
-        // ... other config
-    };
+    let backend = PostgresBackend::new("postgres://localhost/mydb", "my_app").await?;
+    let engine = WorkerEngine::builder()
+        .backend(Arc::new(backend))
+        .queue_name("my_app")
+        .build()
+        .await?;
+    let inspector = engine.inspector();
 
-    let pool = runner_q::runner::redis::create_redis_pool(&cfg.redis_url).await?;
-    let inspector = QueueInspector::new(pool, cfg.queue_name.clone());
-
-    // Create the app - just like Swagger UI!
     let app = Router::new()
         .nest("/console", runnerq_ui(inspector));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8081").await?;
     println!("✨ RunnerQ Console: http://localhost:8081/console");
-    
     serve(listener, app).await?;
     Ok(())
 }

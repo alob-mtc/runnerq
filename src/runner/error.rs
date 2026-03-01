@@ -21,8 +21,8 @@ pub enum WorkerError {
     #[error("Activity handler not found for activity type: {0}")]
     HandlerNotFound(String),
 
-    #[error("Redis connection error: {0}")]
-    RedisError(String),
+    #[error("Backend error: {0}")]
+    BackendError(String),
 
     #[error("Database error: {0}")]
     DatabaseError(String),
@@ -52,17 +52,10 @@ pub enum WorkerError {
     Unknown(String),
 }
 
-#[cfg(feature = "redis")]
-impl From<redis::RedisError> for WorkerError {
-    fn from(err: redis::RedisError) -> Self {
-        WorkerError::RedisError(err.to_string())
-    }
-}
-
 impl From<StorageError> for WorkerError {
     fn from(err: StorageError) -> Self {
         match err {
-            StorageError::Unavailable(msg) => WorkerError::RedisError(msg),
+            StorageError::Unavailable(msg) => WorkerError::BackendError(msg),
             StorageError::Conflict(msg) => WorkerError::QueueError(msg),
             StorageError::NotFound(msg) => WorkerError::QueueError(msg),
             StorageError::Internal(msg) => WorkerError::QueueError(msg),
@@ -79,7 +72,7 @@ impl WorkerError {
     pub fn is_retryable(&self) -> bool {
         match self {
             WorkerError::QueueError(_) => true,
-            WorkerError::RedisError(_) => true,
+            WorkerError::BackendError(_) => true,
             WorkerError::DatabaseError(_) => true,
             WorkerError::Timeout => true,
             WorkerError::ExecutionError(_) => true,

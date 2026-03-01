@@ -9,18 +9,14 @@ use crate::storage::{FailureKind, IdempotencyBehavior, QueuedActivity, Storage};
 use crate::{ActivityContext, ActivityError};
 use chrono::Utc;
 
-#[cfg(any(feature = "redis", feature = "postgres"))]
+#[cfg(feature = "postgres")]
 use crate::observability::QueueInspector;
-#[cfg(feature = "redis")]
-use crate::storage::redis::RedisConfig;
-#[cfg(feature = "redis")]
-use crate::RedisBackend;
 use futures::FutureExt;
 use serde_json::json;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{watch, RwLock, Semaphore};
+use tokio::sync::{watch, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -141,94 +137,6 @@ pub struct WorkerEngine {
 }
 
 impl WorkerEngine {
-    /// Creates a new WorkerEngine with the given Redis connection pool and configuration.
-    ///
-    /// The engine is created in a stopped state and must be started with [`start()`] to begin
-    /// processing activities. Before starting, you should register activity handlers using
-    /// [`register_activity()`].
-    ///
-    /// # Parameters
-    ///
-    /// * `redis_pool` - Redis connection pool for queue operations
-    /// * `config` - Configuration settings for the worker engine
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use runner_q::{WorkerEngine, WorkerConfig};
-    /// use bb8_redis::bb8::Pool;
-    /// use bb8_redis::RedisConnectionManager;
-    /// use std::sync::Arc;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// // Create Redis connection pool
-    /// let redis_pool = Pool::builder()
-    ///     .build(RedisConnectionManager::new("redis://127.0.0.1:6379")?)
-    ///     .await?;
-    ///
-    /// // Create configuration
-    /// let config = WorkerConfig {
-    ///     queue_name: "my_app".to_string(),
-    ///     max_concurrent_activities: 10,
-    ///     redis_url: "redis://127.0.0.1:6379".to_string(),
-    ///     schedule_poll_interval_seconds: Some(30),
-    /// };
-    ///
-    /// // Create worker engine
-    /// let mut worker_engine = WorkerEngine::new(redis_pool, config);
-    ///
-    /// // Register activity handlers before starting
-    /// // worker_engine.register_activity("send_email".to_string(), Arc::new(EmailHandler));
-    ///
-    /// // Start the engine (this will block until shutdown)
-    /// // worker_engine.start().await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// For a more ergonomic API, consider using the builder pattern:
-    ///
-    /// ```rust,no_run
-    /// use runner_q::WorkerEngine;
-    /// use std::time::Duration;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let engine = WorkerEngine::builder()
-    ///     .redis_url("redis://localhost:6379")
-    ///     .queue_name("my_app")
-    ///     .max_workers(10)
-    ///     .schedule_poll_interval(Duration::from_secs(30))
-    ///     .build()
-    ///     .await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[cfg(feature = "redis")]
-    pub fn new(
-        redis_pool: bb8_redis::bb8::Pool<bb8_redis::RedisConnectionManager>,
-        config: WorkerConfig,
-    ) -> Self {
-        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-        let backend: Arc<dyn Storage> = Arc::new(
-            RedisBackend::new(redis_pool, config.queue_name.clone())
-                .with_lease_ms(config.lease_ms.unwrap_or(60_000)),
-        );
-        let adapter = Arc::new(BackendQueueAdapter::new(
-            backend.clone(),
-            config.activity_types.clone(),
-        ));
-        Self {
-            activity_queue: adapter,
-            backend,
-            activity_handlers: ActivityHandlerRegistry::new(),
-            config,
-            running: Arc::new(RwLock::new(false)),
-            shutdown_tx,
-            cancel_token: CancellationToken::new(),
-            metrics: Arc::new(NoopMetrics),
-        }
-    }
-
     /// Creates a new WorkerEngine with a custom backend implementation.
     ///
     /// This allows using alternative backends like Valkey, Kafka, or SQL-based implementations.
@@ -263,7 +171,7 @@ impl WorkerEngine {
     ///
     /// The inspector uses the backend's inspection capabilities for
     /// reading queue state and activity information.
-    #[cfg(any(feature = "redis", feature = "postgres"))]
+    #[cfg(feature = "postgres")]
     pub fn inspector(&self) -> QueueInspector {
         QueueInspector::new(self.backend.clone())
             .with_max_workers(self.config.max_concurrent_activities)
@@ -290,35 +198,20 @@ impl WorkerEngine {
     /// # Ok(())
     /// # }
     ///
-    /// // With custom Redis configuration and metrics
-    /// # async fn example_with_redis_config() -> Result<(), Box<dyn std::error::Error>> {
-    /// use runner_q::{RedisConfig, MetricsSink};
-    /// use std::sync::Arc;
-    ///
-    /// let redis_config = RedisConfig {
-    ///     max_size: 100,
-    ///     min_idle: 10,
-    ///     conn_timeout: Duration::from_secs(60),
-    ///     idle_timeout: Duration::from_secs(600),
-    ///     max_lifetime: Duration::from_secs(3600),
-    /// };
-    ///
-    /// // Custom metrics implementation
+    /// // With custom metrics
+    /// # async fn example_with_metrics() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use runner_q::{WorkerEngine, MetricsSink, storage::PostgresBackend};
+    /// # use std::sync::Arc;
     /// struct PrometheusMetrics;
     /// impl MetricsSink for PrometheusMetrics {
-    ///     fn inc_counter(&self, name: &str, value: u64) {
-    ///         println!("Counter {}: {}", name, value);
-    ///     }
-    ///     fn observe_duration(&self, name: &str, duration: Duration) {
-    ///         println!("Duration {}: {:?}", name, duration);
-    ///     }
+    ///     fn inc_counter(&self, name: &str, value: u64) { let _ = (name, value); }
+    ///     fn observe_duration(&self, name: &str, duration: Duration) { let _ = (name, duration); }
     /// }
-    ///
+    /// let backend = PostgresBackend::new("postgres://localhost/mydb", "my_app").await?;
     /// let engine = WorkerEngine::builder()
-    ///     .redis_url("redis://localhost:6379")
+    ///     .backend(Arc::new(backend))
     ///     .queue_name("my_app")
     ///     .max_workers(8)
-    ///     .redis_config(redis_config)
     ///     .metrics(Arc::new(PrometheusMetrics))
     ///     .build()
     ///     .await?;
@@ -333,8 +226,7 @@ impl WorkerEngine {
     ///
     /// This method performs the following steps:
     /// - Verifies that the engine is not already running, returning `WorkerError::AlreadyRunning` if it is.
-    /// - Marks the engine as active and initializes a semaphore to cap concurrent activity execution
-    ///   at `config.max_concurrent_activities`.
+    /// - Marks the engine as active.
     /// - Spawns both:
     ///   - a background task that periodically processes scheduled activities, and
     ///   - a pool of worker loops (one per available concurrency slot) that dequeue and execute activities.
@@ -395,7 +287,6 @@ impl WorkerEngine {
             "Starting worker engine"
         );
 
-        let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent_activities));
         let mut join_handles = Vec::new();
 
         // Scheduled activities processor (skipped if backend handles it in dequeue)
@@ -408,9 +299,9 @@ impl WorkerEngine {
         let reaper_handle = self.start_reaper_processor().await;
         join_handles.push(reaper_handle);
 
-        // Worker loops (now return Result)
+        // Worker loops — one dedicated loop per worker, no semaphore needed
         for worker_id in 0..self.config.max_concurrent_activities {
-            let handle = self.start_worker_loop(worker_id, semaphore.clone()).await;
+            let handle = self.start_worker_loop(worker_id).await;
             join_handles.push(handle);
         }
 
@@ -481,7 +372,6 @@ impl WorkerEngine {
     /// Spawns a background worker loop that continuously dequeues and executes activities.
     ///
     /// Each worker operates independently and performs the following cycle while the engine is running:
-    /// - Acquires a permit from the provided semaphore to enforce the global concurrency limit.
     /// - Attempts to dequeue an activity from the queue (waiting briefly if none are available).
     /// - Looks up the registered handler for the dequeued activity type.
     /// - Executes the handler with a per-activity timeout, passing in an `ActivityContext` containing
@@ -507,28 +397,11 @@ impl WorkerEngine {
     /// # Notes
     ///
     /// - This function does not block; it spawns a background task and immediately returns.
-    /// - Each worker is lightweight and safe to run concurrently; the semaphore ensures that
-    ///   the total number of active activities never exceeds the configured concurrency limit.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use std::sync::Arc;
-    /// # use tokio::sync::Semaphore;
-    /// # async fn example(engine: &crate::runner::WorkerEngine) {
-    /// let semaphore = Arc::new(Semaphore::new(4));
-    ///
-    /// // Spawn a worker loop with ID 0
-    /// let handle = engine.start_worker_loop(0, semaphore.clone()).await;
-    ///
-    /// // The returned JoinHandle runs until the engine stops or a shutdown signal is received.
-    /// handle.await.ok();
-    /// # }
-    /// ```
+    /// - Concurrency is bounded by the number of worker loops spawned
+    ///   (`max_concurrent_activities`), so no additional semaphore is needed.
     async fn start_worker_loop(
         &self,
         worker_id: usize,
-        semaphore: Arc<Semaphore>,
     ) -> tokio::task::JoinHandle<Result<(), WorkerError>> {
         let running = self.running.clone();
         let activity_queue = self.activity_queue.clone();
@@ -549,22 +422,10 @@ impl WorkerEngine {
                     break;
                 }
 
-                // Acquire permit (bounded concurrency)
-                let permit = match semaphore.try_acquire() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_millis(100)) => {},
-                            _ = shutdown_rx.changed() => break,
-                        }
-                        continue;
-                    }
-                };
-
                 // Dequeue with cooperative shutdown
                 let dequeue_fut = activity_queue.dequeue(Duration::from_secs(1), &worker_label);
                 let activity_opt = tokio::select! {
-                    _ = shutdown_rx.changed() => { drop(permit); break; }
+                    _ = shutdown_rx.changed() => { break; }
                     res = dequeue_fut => res
                 };
 
@@ -574,7 +435,6 @@ impl WorkerEngine {
                         a
                     }
                     Ok(None) => {
-                        drop(permit);
                         let sleep_for = backoff.next();
                         tokio::select! {
                             _ = tokio::time::sleep(sleep_for) => {},
@@ -584,7 +444,6 @@ impl WorkerEngine {
                     }
                     Err(e) => {
                         error!(%worker_id, error = %e, "Failed to dequeue activity");
-                        drop(permit);
                         tokio::select! {
                             _ = tokio::time::sleep(Duration::from_secs(1)) => {},
                             _ = shutdown_rx.changed() => break,
@@ -614,7 +473,6 @@ impl WorkerEngine {
                         {
                             error!(%worker_id, activity_id = %activity_id, error = %e, "Failed to mark activity as failed");
                         }
-                        drop(permit);
                         continue;
                     }
                 };
@@ -640,7 +498,6 @@ impl WorkerEngine {
                 // Execute with timeout and cooperative shutdown
                 let timed = tokio::select! {
                     _ = shutdown_rx.changed() => {
-                        drop(permit);
                         break;
                     }
                     res = tokio::time::timeout(activity_timeout, async {
@@ -777,8 +634,6 @@ impl WorkerEngine {
                         }
                     }
                 }
-
-                drop(permit);
             }
 
             debug!(%worker_id, "Worker loop stopped");
@@ -1048,8 +903,9 @@ impl WorkerEngine {
 /// use std::time::Duration;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let backend = PostgresBackend::new("postgres://localhost/mydb", "my_app").await?;
 /// let engine = WorkerEngine::builder()
-///     .redis_url("redis://localhost:6379")
+///     .backend(Arc::new(backend))
 ///     .queue_name("my_app")
 ///     .max_workers(8)
 ///     .schedule_poll_interval(Duration::from_secs(30))
@@ -1059,13 +915,9 @@ impl WorkerEngine {
 /// # }
 /// ```
 pub struct WorkerEngineBuilder {
-    #[cfg(feature = "redis")]
-    redis_url: Option<String>,
     queue_name: Option<String>,
     max_workers: Option<usize>,
     schedule_poll_interval: Option<Duration>,
-    #[cfg(feature = "redis")]
-    redis_config: Option<RedisConfig>,
     metrics: Option<Arc<dyn MetricsSink>>,
     backend: Option<Arc<dyn Storage>>,
     activity_types: Option<Vec<String>>,
@@ -1075,28 +927,13 @@ impl WorkerEngineBuilder {
     /// Creates a new WorkerEngineBuilder with default values.
     pub fn new() -> Self {
         Self {
-            #[cfg(feature = "redis")]
-            redis_url: None,
             queue_name: None,
             max_workers: None,
             schedule_poll_interval: None,
-            #[cfg(feature = "redis")]
-            redis_config: None,
             metrics: None,
             backend: None,
             activity_types: None,
         }
-    }
-
-    /// Sets the Redis URL for the worker engine.
-    ///
-    /// # Parameters
-    ///
-    /// * `url` - Redis connection URL (e.g., "redis://localhost:6379")
-    #[cfg(feature = "redis")]
-    pub fn redis_url(mut self, url: &str) -> Self {
-        self.redis_url = Some(url.to_string());
-        self
     }
 
     /// Sets the queue name for the worker engine.
@@ -1122,8 +959,7 @@ impl WorkerEngineBuilder {
     /// Sets the schedule poll interval for processing scheduled activities.
     ///
     /// Only takes effect for backends that do not handle scheduling natively
-    /// in `dequeue()` (e.g. Redis). The PostgreSQL backend skips the polling
-    /// loop entirely.
+    /// in `dequeue()`. The PostgreSQL backend skips the polling loop entirely.
     ///
     /// # Parameters
     ///
@@ -1146,17 +982,6 @@ impl WorkerEngineBuilder {
         self
     }
 
-    /// Sets the Redis connection pool configuration.
-    ///
-    /// # Parameters
-    ///
-    /// * `config` - Redis connection pool configuration
-    #[cfg(feature = "redis")]
-    pub fn redis_config(mut self, config: RedisConfig) -> Self {
-        self.redis_config = Some(config);
-        self
-    }
-
     /// Sets the metrics sink for monitoring activity processing.
     ///
     /// # Parameters
@@ -1167,28 +992,18 @@ impl WorkerEngineBuilder {
         self
     }
 
-    /// Sets a custom backend implementation.
+    /// Sets the storage backend. Required—you must call this or `build()` will fail.
     ///
-    /// When a custom backend is provided, the `redis_url` and `redis_config` options
-    /// are ignored. The backend is used directly for all queue operations.
-    ///
-    /// # Parameters
-    ///
-    /// * `backend` - Custom backend implementation
+    /// Use `PostgresBackend::new(...)` for PostgreSQL, or the `runner_q_redis` crate
+    /// for Redis.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use runner_q::{WorkerEngine, storage::{Backend, RedisBackend}};
+    /// use runner_q::{WorkerEngine, storage::PostgresBackend};
     /// use std::sync::Arc;
     ///
-    /// // Create a custom backend
-    /// let backend = RedisBackend::builder()
-    ///     .redis_url("redis://localhost:6379")
-    ///     .queue_name("my_app")
-    ///     .build()
-    ///     .await?;
-    ///
+    /// let backend = PostgresBackend::new("postgres://localhost/mydb", "my_app").await?;
     /// let engine = WorkerEngine::builder()
     ///     .backend(Arc::new(backend))
     ///     .max_workers(8)
@@ -1214,13 +1029,11 @@ impl WorkerEngineBuilder {
         let max_concurrent_activities = self.max_workers.unwrap_or(10);
         let schedule_poll_interval_seconds = self.schedule_poll_interval.map_or(5, |d| d.as_secs());
 
-        // If a custom backend is provided, use it
         if let Some(backend) = self.backend {
             let queue_name = self.queue_name.unwrap_or_else(|| "default".to_string());
             let config = WorkerConfig {
                 queue_name,
                 max_concurrent_activities,
-                redis_url: "custom-backend".to_string(), // Placeholder, not used
                 schedule_poll_interval_seconds: Some(schedule_poll_interval_seconds),
                 lease_ms: Some(60_000),
                 reaper_interval_seconds: Some(5),
@@ -1237,46 +1050,10 @@ impl WorkerEngineBuilder {
             return Ok(worker_engine);
         }
 
-        // Default: use Redis backend (requires redis feature)
-        #[cfg(feature = "redis")]
-        {
-            let redis_url = self
-                .redis_url
-                .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
-            let queue_name = self.queue_name.unwrap_or_else(|| "default".to_string());
-
-            let config = WorkerConfig {
-                queue_name: queue_name.clone(),
-                max_concurrent_activities,
-                redis_url: redis_url.clone(),
-                schedule_poll_interval_seconds: Some(schedule_poll_interval_seconds),
-                lease_ms: Some(60_000),
-                reaper_interval_seconds: Some(5),
-                reaper_batch_size: Some(100),
-                activity_types: self.activity_types.clone(),
-            };
-
-            let backend = RedisBackend::builder()
-                .redis_url(&redis_url)
-                .queue_name(queue_name)
-                .build()
-                .await?;
-            let mut worker_engine = WorkerEngine::new_with_backend(Arc::new(backend), config);
-
-            // Apply custom metrics if provided
-            if let Some(metrics) = self.metrics {
-                worker_engine.with_metrics(metrics);
-            }
-
-            return Ok(worker_engine);
-        }
-
-        #[cfg(not(feature = "redis"))]
-        {
-            Err(WorkerError::Configuration(
-                "No backend configured. Either provide a custom backend via .backend() or enable the 'redis' feature".to_string()
-            ))
-        }
+        Err(WorkerError::Configuration(
+            "No backend configured. Call .backend(Arc::new(your_backend)) before .build(). \
+             Use PostgresBackend::new(...) for PostgreSQL, or the runner_q_redis crate for Redis.".to_string()
+        ))
     }
 }
 

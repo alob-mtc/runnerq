@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use axum::{serve, Router};
 use runner_q::{
-    runnerq_ui, ActivityContext, ActivityError, ActivityHandler, ActivityHandlerResult,
-    RedisBackend, WorkerEngine,
+    runnerq_ui, storage::PostgresBackend, ActivityContext, ActivityError, ActivityHandler,
+    ActivityHandlerResult, WorkerEngine,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,15 +45,10 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:runnerq@localhost:5432/runnerq".to_string());
 
-    // Custom backend
-    let backend = RedisBackend::builder()
-        .redis_url(&redis_url)
-        .queue_name("test_sse")
-        .build()
-        .await?;
+    let backend = PostgresBackend::new(&database_url, "test_sse").await?;
 
     // Build worker engine
     let mut engine = WorkerEngine::builder()

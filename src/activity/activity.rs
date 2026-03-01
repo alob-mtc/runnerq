@@ -427,15 +427,13 @@ impl ActivityFuture {
 
     /// Waits for and returns the completed activity result, consuming the `ActivityFuture`.
     ///
-    /// This async method polls the associated activity queue until the activity produces a result
-    /// or a 5-minute timeout elapses. On success it returns `Ok(Some(value))` when the activity
-    /// completed with a value, or `Ok(None)` when it completed without a value. If the activity
-    /// failed, the failure payload is converted to a JSON string and returned as
-    /// `Err(WorkerError::CustomError)`. If no result arrives within 5 minutes, it returns
-    /// `Err(WorkerError::Timeout)`.
+    /// This async method polls the associated activity queue until the activity produces a
+    /// result. It waits indefinitely — the caller is responsible for applying their own
+    /// timeout (e.g. `tokio::time::timeout`) if one is needed.
     ///
-    /// The function propagates errors returned by the queue (e.g., `WorkerError` variants)
-    /// encountered while polling.
+    /// On success it returns `Ok(Some(value))` when the activity completed with a value,
+    /// or `Ok(None)` when it completed without a value. If the activity failed, the failure
+    /// payload is converted to a JSON string and returned as `Err(WorkerError::CustomError)`.
     ///
     /// # Examples
     ///
@@ -445,29 +443,22 @@ impl ActivityFuture {
     /// match fut.get_result().await {
     ///     Ok(Some(json)) => println!("activity result: {:?}", json),
     ///     Ok(None) => println!("activity completed with no result"),
-    ///     Err(e) => eprintln!("activity failed or timed out: {:?}", e),
+    ///     Err(e) => eprintln!("activity failed: {:?}", e),
     /// }
     /// ```
     pub async fn get_result(self) -> Result<Option<serde_json::Value>, crate::WorkerError> {
-        let timeout = std::time::Duration::from_secs(300); // 5 minutes timeout
-
-        tokio::time::timeout(timeout, async move {
-            loop {
-                if let Some(result) = self.queue.get_result(self.activity_id).await? {
-                    return match result.state {
-                        ResultState::Ok => Ok(result.data),
-                        ResultState::Err => {
-                            let result_json = serde_json::to_string(&result.data)?;
-                            Err(WorkerError::CustomError(result_json))
-                        }
-                    };
-                }
-
-                // Use exponential backoff to reduce load: start with 50ms, cap at 1s
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        loop {
+            if let Some(result) = self.queue.get_result(self.activity_id).await? {
+                return match result.state {
+                    ResultState::Ok => Ok(result.data),
+                    ResultState::Err => {
+                        let result_json = serde_json::to_string(&result.data)?;
+                        Err(WorkerError::CustomError(result_json))
+                    }
+                };
             }
-        })
-        .await
-        .map_err(|_| crate::WorkerError::Timeout)?
+
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 }

@@ -13,7 +13,7 @@
 //! - **Activity orchestration** enabling activities to execute other activities
 //! - **Comprehensive error handling** with retryable and non-retryable error types
 //! - **Activity metadata** support for context and tracking
-//! - **Pluggable storage backends** - Redis (default), PostgreSQL, or bring your own
+//! - **Pluggable storage backends** - PostgreSQL (built-in), or bring your own (e.g. `runner_q_redis` for Redis)
 //! - **Worker-level activity type filtering** - Isolate workloads by restricting engines to specific types
 //! - **Queue statistics** and monitoring capabilities
 //! - **Web-based observability console** for real-time monitoring
@@ -24,23 +24,16 @@
 //!
 //! | Backend | Feature Flag | Status | Description |
 //! |---------|--------------|--------|-------------|
-//! | Redis | (default) | Stable | High-performance with Lua scripts for atomicity |
-//! | PostgreSQL | `postgres` | Stable | Permanent persistence with `FOR UPDATE SKIP LOCKED` |
+//! | PostgreSQL | `postgres` (default) | Stable | Permanent persistence, `FOR UPDATE SKIP LOCKED` |
+//! | Redis | `runner_q_redis` crate | Optional | Use the separate crate for Redis/Valkey |
 //!
-//! ### Using a Custom Backend
+//! ### Using a Backend
 //!
 //! ```rust,ignore
-//! use runner_q::{WorkerEngine, Storage};
+//! use runner_q::{WorkerEngine, storage::PostgresBackend};
 //! use std::sync::Arc;
 //!
-//! // With default Redis backend
-//! let engine = WorkerEngine::builder()
-//!     .redis_url("redis://localhost:6379")
-//!     .queue_name("my_app")
-//!     .build()
-//!     .await?;
-//!
-//! // With custom backend (e.g., PostgreSQL)
+//! // With PostgreSQL (built-in)
 //! #[cfg(feature = "postgres")]
 //! {
 //!     use runner_q::storage::PostgresBackend;
@@ -119,9 +112,10 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Improved API: Builder pattern for WorkerEngine
+//!     // Builder pattern: provide a backend (e.g. PostgresBackend::new(...))
+//!     let backend = PostgresBackend::new("postgres://localhost/mydb", "my_app").await?;
 //!     let engine = WorkerEngine::builder()
-//!         .redis_url("redis://localhost:6379")
+//!         .backend(Arc::new(backend))
 //!         .queue_name("my_app")
 //!         .max_workers(8)
 //!         .schedule_poll_interval(Duration::from_secs(30))
@@ -248,9 +242,9 @@ pub mod storage;
 
 // Re-export main types for easy access
 pub use crate::config::WorkerConfig;
-#[cfg(any(feature = "redis", feature = "postgres"))]
+#[cfg(feature = "postgres")]
 pub use crate::observability::QueueInspector;
-#[cfg(all(feature = "axum-ui", any(feature = "redis", feature = "postgres")))]
+#[cfg(all(feature = "axum-ui", feature = "postgres"))]
 pub use crate::observability::{observability_api, runnerq_ui};
 pub use crate::observability::{
     ActivityEvent, ActivityEventType, ActivitySnapshot, DeadLetterRecord, QueueStats, CONSOLE_HTML,
@@ -267,10 +261,6 @@ pub use activity::error::{ActivityError, RetryableError};
 
 // Re-export storage types for custom backend implementations
 pub use crate::storage::{InspectionStorage, QueueStorage, Storage, StorageError};
-
-// Re-export RedisBackend when the redis feature is enabled
-#[cfg(feature = "redis")]
-pub use crate::storage::{redis::RedisConfig, RedisBackend};
 
 // Re-export PostgresBackend when the postgres feature is enabled
 #[cfg(feature = "postgres")]

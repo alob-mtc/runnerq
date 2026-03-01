@@ -43,9 +43,9 @@ struct Pagination {
 /// use axum::Router;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// // Build the worker engine (e.g., with Redis)
+/// // Build the worker engine with a backend (e.g. PostgresBackend::new(...))
 /// let engine = WorkerEngineBuilder::new()
-///     .redis_url("redis://127.0.0.1:6379")
+///     .backend(backend)
 ///     .queue_name("my_app")
 ///     .max_concurrent_activities(10)
 ///     .build()
@@ -97,16 +97,14 @@ pub fn runnerq_ui(inspector: QueueInspector) -> Router {
 /// use axum::Router;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// // Build the worker engine (e.g., with Postgres)
+/// // Build the worker engine with a backend (e.g. PostgresBackend::new(...))
 /// let engine = WorkerEngineBuilder::new()
-///     .postgres_url("postgres://user:pass@localhost/db")
+///     .backend(backend)
 ///     .queue_name("my_app")
 ///     .max_concurrent_activities(10)
 ///     .build()
 ///     .await?;
-///
-/// // Create inspector from the engine's backend
-/// let inspector = engine.inspector().expect("Backend supports inspection");
+/// let inspector = engine.inspector();
 ///
 /// let app = Router::new()
 ///     .nest("/api/observability", observability_api(inspector));
