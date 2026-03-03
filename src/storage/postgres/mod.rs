@@ -1267,7 +1267,28 @@ impl InspectionStorage for PostgresBackend {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ActivitySnapshot>, StorageError> {
-        self.list_by_status("completed", offset, limit).await
+        // Include completed and failed (not dead_letter; those stay in Dead Letter tab)
+        let rows: Vec<ActivityRow> = sqlx::query_as(
+            r#"
+            SELECT * FROM runnerq_activities
+            WHERE queue_name = $1 AND status IN ('completed', 'failed')
+            ORDER BY completed_at DESC NULLS LAST, created_at DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(&self.queue_name)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Internal(format!("Failed to list completed: {}", e)))?;
+
+        let mut snapshots = Vec::new();
+        for row in rows {
+            snapshots.push(row.to_snapshot()?);
+        }
+
+        Ok(snapshots)
     }
 
     async fn list_dead_letter(
