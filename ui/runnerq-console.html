@@ -3649,7 +3649,7 @@
                     case "DeadLetter":
                         return "dead_letter";
                     case "Failed":
-                        return "processing"; // Might be in processing before completion
+                        return "completed";
                     default:
                         return null;
                 }
@@ -3859,8 +3859,8 @@
                     completed: "completed",
                     success: "completed",
                     succeeded: "completed",
-                    failed: "dead_letter",
-                    error: "dead_letter",
+                    failed: "completed",
+                    error: "completed",
                     dead_letter: "dead_letter",
                     deadletter: "dead_letter",
                     scheduled: "scheduled",

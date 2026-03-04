@@ -1,17 +1,42 @@
 name: Publish to crates.io
 on:
   push:
-    tags: ["v*"] # Triggers when pushing tags starting with 'v'
+    tags:
+      - "v*"
+      - "runner_q-v*"
+      - "runner_q_redis-v*"
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: release # Optional: for enhanced security
+    environment: release
     permissions:
-      id-token: write # Required for OIDC token exchange
+      id-token: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: rust-lang/crates-io-auth-action@v1
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+      - uses: rust-lang/crates-io-auth-action@63a7064947ceca9989005e118db3a5fecdc9259f
         id: auth
-      - run: cargo publish
+      # Tag determines which crate(s) to publish:
+      #   runner_q_redis-v*  → runner_q_redis only
+      #   runner_q-v*        → runner_q only
+      #   v* (e.g. v0.6.5)   → both (runner_q then runner_q_redis)
+      - name: Publish runner_q
+        if: ${{ (startsWith(github.ref_name, 'v') && !startsWith(github.ref_name, 'runner_q_redis-v')) || startsWith(github.ref_name, 'runner_q-v') }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            cargo publish -p runner_q && exit 0
+            [ "$attempt" -eq 5 ] && exit 1
+            sleep $((attempt * 15))
+          done
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Publish runner_q_redis
+        if: ${{ (startsWith(github.ref_name, 'v') && !startsWith(github.ref_name, 'runner_q-v')) || startsWith(github.ref_name, 'runner_q_redis-v') }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            cargo publish -p runner_q_redis && exit 0
+            [ "$attempt" -eq 5 ] && exit 1
+            sleep $((attempt * 15))
+          done
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

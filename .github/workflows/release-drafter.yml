@@ -10,12 +10,35 @@ permissions:
   pull-requests: read
 
 jobs:
-  update_release_draft:
+  # Draft for combined release (tag: v0.6.5)
+  draft_combined:
     runs-on: ubuntu-latest
     steps:
-      - name: Update draft release notes
+      - name: Update draft release notes (combined v*)
         uses: release-drafter/release-drafter@v6
         with:
           config-name: release-drafter.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Draft for runner_q-only release (tag: runner_q-v0.6.5)
+  draft_runner_q:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update draft release notes (runner_q)
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter-runner_q.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Draft for runner_q_redis-only release (tag: runner_q_redis-v0.1.1)
+  draft_runner_q_redis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update draft release notes (runner_q_redis)
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter-runner_q_redis.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
