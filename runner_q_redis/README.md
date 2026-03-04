@@ -8,8 +8,8 @@ Add both crates to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-runner_q = "0.6"
-runner_q_redis = "0.6"
+runner_q = "0.*"
+runner_q_redis = "0.*"
 ```
 
 Create a backend and pass it to the engine:
