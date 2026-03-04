@@ -10,7 +10,7 @@ readme = "README.md"
 keywords = ["runnerq", "redis", "queue", "worker"]
 
 [dependencies]
-runner_q = { path = ".." }
+runner_q = { path = "..", version = "0.6" }
 redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
 bb8-redis = "0.14"
 async-trait = "0.1.89"
