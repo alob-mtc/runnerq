@@ -54,7 +54,9 @@ Each draft shows PRs merged since the last tag of that kind. When you’re ready
 
 ### Release both together
 
-1. **Bump versions** in **both** `Cargo.toml` files to the same value (e.g. `0.6.5`).
+1. **Bump versions** in both `Cargo.toml` files.
+   - To keep versions aligned, set both to the same value (e.g. `0.6.5`).
+   - You can also bump each crate to its own next version if you version independently.
 
 2. **Commit and push.**
 
